@@ -37,6 +37,7 @@ COPY --chown=leftovers:leftovers config /app/config
 COPY --chown=leftovers:leftovers examples /app/examples
 COPY --chown=leftovers:leftovers sandbox /app/sandbox
 COPY --chown=leftovers:leftovers schemas /app/schemas
+COPY --chown=leftovers:leftovers schedules /app/schedules
 COPY --chown=leftovers:leftovers scripts /app/scripts
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
