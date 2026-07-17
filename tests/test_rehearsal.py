@@ -153,6 +153,17 @@ class RehearsalTests(unittest.TestCase):
                     self.assertIn("--cap-drop=ALL", argv)
                     self.assertIn("no-new-privileges=true", joined)
                     self.assertIn("/workspace/.git,ro", joined)
+                    mounts = [
+                        argv[index + 1]
+                        for index, value in enumerate(argv[:-1])
+                        if value == "--mount"
+                    ]
+                    self.assertIn(
+                        f"type=bind,src={workspace.resolve()},dst=/workspace",
+                        mounts,
+                    )
+                    self.assertIn(f"type=bind,src={output.resolve()},dst=/out", mounts)
+                    self.assertFalse(any(mount.endswith(",rw") for mount in mounts))
                     self.assertIn("LEFTOVERS_RESULT_PATH=/out/result.json", argv)
                     self.assertIn("LEFTOVERS_TELEMETRY_PATH=/out/telemetry.ndjson", argv)
                     self.assertIn("io.leftovers.job=rehearsal-run", argv)

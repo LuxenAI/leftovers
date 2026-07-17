@@ -465,7 +465,9 @@ class AgentRunner:
         network: str | None = None,
         pass_agent_environment: bool = False,
     ) -> list[str]:
-        workspace_mode = "ro" if read_only_workspace else "rw"
+        workspace_mount = f"type=bind,src={workspace.resolve()},dst=/workspace"
+        if read_only_workspace:
+            workspace_mount += ",ro"
         name = f"leftovers-{run_id[:12]}-{stage}".replace("_", "-")[:63]
         lease_expires = (
             int(time.time()) + max(self.agent.timeout_seconds, self.sandbox.timeout_seconds) + 300
@@ -511,9 +513,9 @@ class AgentRunner:
             "--workdir",
             "/workspace",
             "--mount",
-            f"type=bind,src={workspace.resolve()},dst=/workspace,{workspace_mode}",
+            workspace_mount,
             "--mount",
-            f"type=bind,src={output_dir.resolve()},dst=/out,rw",
+            f"type=bind,src={output_dir.resolve()},dst=/out",
             "--env",
             "CI=1",
             "--env",

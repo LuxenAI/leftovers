@@ -252,6 +252,10 @@ class RunnerTests(unittest.TestCase):
             "/workspace/.git,ro",
         ):
             self.assertIn(required, joined)
+        mounts = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--mount"]
+        self.assertIn(f"type=bind,src={workspace.resolve()},dst=/workspace", mounts)
+        self.assertIn(f"type=bind,src={output.resolve()},dst=/out", mounts)
+        self.assertFalse(any(mount.endswith(",rw") for mount in mounts))
         self.assertIn("OPENAI_API_KEY", argv)
         self.assertIn("LEFTOVERS_TELEMETRY_PATH=/out/telemetry.ndjson", argv)
         self.assertNotIn("GITHUB_TOKEN", joined)
@@ -305,6 +309,9 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("io.leftovers.job=run-123", joined)
         self.assertIn("io.leftovers.stage=planning", joined)
         self.assertIn("io.leftovers.lease_expires=", joined)
+        mounts = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--mount"]
+        self.assertIn(f"type=bind,src={workspace.resolve()},dst=/workspace,ro", mounts)
+        self.assertIn(f"type=bind,src={output.resolve()},dst=/out", mounts)
 
     def test_failed_container_execution_still_attempts_label_scoped_cleanup(self) -> None:
         runner = AgentRunner(
