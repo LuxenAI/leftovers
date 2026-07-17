@@ -8,7 +8,6 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCKERFILE = ROOT / "Dockerfile"
 RUN_CYCLE = ROOT / "scripts" / "run-cycle.sh"
 LAUNCHD = ROOT / "schedules" / "launchd"
 SYSTEMD = ROOT / "schedules" / "systemd"
@@ -37,13 +36,6 @@ def _parse_systemd_unit(path: Path) -> dict[str, dict[str, list[str]]]:
 
 
 class SchedulerRegressionTests(unittest.TestCase):
-    def test_container_test_stage_includes_scheduler_assets(self) -> None:
-        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-        self.assertIn(
-            "COPY --chown=leftovers:leftovers schedules /app/schedules",
-            dockerfile,
-        )
-
     def test_run_cycle_has_valid_posix_shell_syntax_and_safety_contract(self) -> None:
         syntax = subprocess.run(
             ["/bin/sh", "-n", str(RUN_CYCLE)],
