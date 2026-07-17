@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.dev/schemas/adapter-telemetry.schema.json",
+  "title": "Leftovers adapter telemetry event",
+  "oneOf": [
+    { "$ref": "#/$defs/checkin" },
+    { "$ref": "#/$defs/heartbeat" },
+    { "$ref": "#/$defs/usage" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["version", "sequence", "type", "observed_at"],
+      "properties": {
+        "version": { "const": 1 },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "type": { "type": "string" },
+        "observed_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+      }
+    },
+    "checkin": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": [
+            "version",
+            "sequence",
+            "type",
+            "provider",
+            "model",
+            "adapter_version",
+            "capabilities",
+            "observed_at"
+          ],
+          "properties": {
+            "version": { "const": 1 },
+            "sequence": { "const": 1 },
+            "type": { "const": "checkin" },
+            "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "adapter_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "capabilities": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+            },
+            "observed_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "heartbeat": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["version", "sequence", "type", "observed_at"],
+          "properties": {
+            "version": { "const": 1 },
+            "sequence": { "type": "integer", "minimum": 2, "maximum": 1024 },
+            "type": { "const": "heartbeat" },
+            "observed_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "usage": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": [
+            "version",
+            "sequence",
+            "type",
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "source",
+            "exact",
+            "final",
+            "observed_at"
+          ],
+          "properties": {
+            "version": { "const": 1 },
+            "sequence": { "type": "integer", "minimum": 2, "maximum": 1024 },
+            "type": { "const": "usage" },
+            "input_tokens": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+            "output_tokens": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+            "cached_input_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "reasoning_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "total_tokens": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+            "source": {
+              "enum": [
+                "provider_response",
+                "broker_attested",
+                "adapter_reported",
+                "estimated",
+                "synthetic"
+              ]
+            },
+            "exact": { "type": "boolean" },
+            "final": { "const": true },
+            "observed_at": { "type": "string", "format": "date-time", "maxLength": 64 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

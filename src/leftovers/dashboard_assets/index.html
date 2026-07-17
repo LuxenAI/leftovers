@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Leftovers operations</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to dashboard</a>
+  <div class="page-shell">
+    <header class="masthead">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">L</span>
+        <div>
+          <p class="eyebrow">Local operations</p>
+          <h1>Leftovers</h1>
+        </div>
+      </div>
+      <div class="connection" aria-live="polite">
+        <span id="connection-dot" class="status-dot status-unknown" aria-hidden="true"></span>
+        <span id="connection-status">Connecting</span>
+        <span class="connection-divider" aria-hidden="true"></span>
+        <span id="last-updated">Not updated</span>
+        <button id="refresh-button" class="secondary-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="budget-heading">
+        <div class="section-heading hero-heading">
+          <div>
+            <p class="eyebrow">Qualified quota window</p>
+            <h2 id="budget-heading">Usage envelope</h2>
+          </div>
+          <div class="window-context">
+            <span id="window-kind" class="status-chip neutral">Unknown window</span>
+            <span id="window-reset">Reset unknown</span>
+          </div>
+        </div>
+
+        <div class="metric-grid" aria-label="Quota metrics">
+          <article class="metric-card emphasis-card">
+            <p class="metric-label">Maximum</p>
+            <p id="metric-maximum" class="metric-value">Unknown</p>
+            <p id="metric-maximum-note" class="metric-note">Qualification unknown</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Remaining</p>
+            <p id="metric-remaining" class="metric-value">Unknown</p>
+            <p class="metric-note">Provider-reported balance</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Safety reserve</p>
+            <p id="metric-reserve" class="metric-value">Unknown</p>
+            <p class="metric-note">Held outside spendable quota</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Reserved</p>
+            <p id="metric-reserved" class="metric-value">Unknown</p>
+            <p class="metric-note">Admitted active work</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Known used</p>
+            <p id="metric-used" class="metric-value">Unknown</p>
+            <p class="metric-note">Validated usage receipts</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Usage coverage</p>
+            <p id="metric-coverage" class="metric-value">Unknown</p>
+            <p id="metric-coverage-note" class="metric-note">Receipt coverage unknown</p>
+          </article>
+        </div>
+
+        <div class="usage-track-wrap">
+          <div class="usage-track-heading">
+            <span>Known window usage</span>
+            <span id="spendable-value">Spendable unknown</span>
+          </div>
+          <progress
+            id="usage-progress"
+            class="usage-track is-unknown"
+            max="1"
+            aria-label="Known token usage within the qualified maximum"
+            aria-valuetext="Unknown"
+          >Unknown</progress>
+        </div>
+      </section>
+
+      <div class="primary-grid">
+        <section class="panel stage-panel" aria-labelledby="stage-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Current cycle</p>
+              <h2 id="stage-heading">Active stage</h2>
+            </div>
+            <span id="active-kind" class="status-chip neutral">Unknown</span>
+          </div>
+          <div class="stage-readout">
+            <span id="active-stage-dot" class="stage-dot" aria-hidden="true"></span>
+            <div>
+              <p id="active-stage" class="stage-name">No confirmed active run</p>
+              <p id="active-run-detail" class="supporting-text">Run and issue unknown</p>
+            </div>
+          </div>
+          <ol id="stage-rail" class="stage-rail" aria-label="Contribution lifecycle">
+            <li data-stage-group="prepare"><span>Prepare</span></li>
+            <li data-stage-group="work"><span>Work</span></li>
+            <li data-stage-group="verify"><span>Verify</span></li>
+            <li data-stage-group="publish"><span>Publish</span></li>
+            <li data-stage-group="clean"><span>Clean</span></li>
+          </ol>
+        </section>
+
+        <section class="panel health-panel" aria-labelledby="health-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Control plane</p>
+              <h2 id="health-heading">Health</h2>
+            </div>
+            <span id="health-status" class="status-chip neutral">Unknown</span>
+          </div>
+          <p id="health-summary" class="health-summary">No health reading has been received.</p>
+          <ul id="health-components" class="component-list" aria-label="Health components"></ul>
+        </section>
+      </div>
+
+      <section class="models-section" aria-labelledby="models-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Adapter identity</p>
+            <h2 id="models-heading">Model invocations</h2>
+          </div>
+          <span id="model-count" class="count-label">Unknown</span>
+        </div>
+        <div id="models-list" class="model-grid" aria-live="polite"></div>
+        <p id="models-empty" class="empty-state">No model invocation is available.</p>
+      </section>
+
+      <section class="runs-section" aria-labelledby="runs-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Audit-safe history</p>
+            <h2 id="runs-heading">Recent runs</h2>
+          </div>
+          <span class="count-label">Production and training stay separate</span>
+        </div>
+
+        <div class="run-columns">
+          <section class="run-lane production-lane" aria-labelledby="production-heading">
+            <div class="lane-heading">
+              <h3 id="production-heading">Production</h3>
+              <span id="production-count" class="status-chip production">Unknown</span>
+            </div>
+            <ol id="production-runs" class="run-list"></ol>
+            <p id="production-empty" class="empty-state">No production runs reported.</p>
+          </section>
+
+          <section class="run-lane training-lane" aria-labelledby="training-heading">
+            <div class="lane-heading">
+              <h3 id="training-heading">Training</h3>
+              <span id="training-count" class="status-chip training">Unknown</span>
+            </div>
+            <ol id="training-runs" class="run-list"></ol>
+            <p id="training-empty" class="empty-state">No training runs reported.</p>
+          </section>
+        </div>
+
+        <section id="unclassified-section" class="unclassified-section" aria-labelledby="unclassified-heading" hidden>
+          <div class="lane-heading">
+            <h3 id="unclassified-heading">Unclassified</h3>
+            <span id="unclassified-count" class="status-chip warning">Unknown</span>
+          </div>
+          <p class="supporting-text">These runs did not carry a verified production or training identity.</p>
+          <ol id="unclassified-runs" class="run-list"></ol>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <span>Read-only local view</span>
+      <span aria-hidden="true">·</span>
+      <span>Automatic refresh every 5 seconds</span>
+      <span aria-hidden="true">·</span>
+      <span>Unknown values are never treated as zero</span>
+    </footer>
+  </div>
+
+  <div id="announcement" class="sr-only" aria-live="polite"></div>
+</body>
+</html>

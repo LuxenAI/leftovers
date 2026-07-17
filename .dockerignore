@@ -1,0 +1,8 @@
+.git
+.leftovers
+.agent
+__pycache__
+*.pyc
+.venv
+dist
+build

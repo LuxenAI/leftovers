@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Leftovers daily near the configured quota reset
+
+[Timer]
+OnCalendar=*-*-* 22:30:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=leftovers.service
+
+[Install]
+WantedBy=timers.target

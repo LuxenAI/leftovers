@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.dev/schemas/agent-result.schema.json",
+  "title": "Leftovers agent stage result",
+  "oneOf": [
+    { "$ref": "#/$defs/planning" },
+    { "$ref": "#/$defs/implementation" },
+    { "$ref": "#/$defs/review" },
+    { "$ref": "#/$defs/prWriter" }
+  ],
+  "$defs": {
+    "planning": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["planned", "blocked", "failed"] },
+        "acceptance_criteria": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "reproduction": {
+          "type": "object",
+          "required": ["argv", "observed"],
+          "properties": {
+            "argv": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "observed": { "type": "string", "minLength": 1 }
+          }
+        },
+        "root_cause": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["path", "evidence"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "evidence": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "steps": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "tests": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+        },
+        "risks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "estimated_remaining_tokens": { "type": "integer", "minimum": 0 },
+        "stop_conditions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "planned" } } },
+          "then": { "required": ["acceptance_criteria", "reproduction", "root_cause", "steps", "tests", "risks", "estimated_remaining_tokens", "stop_conditions"] },
+          "else": { "required": ["reason"] }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "implementation": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["implemented", "blocked", "failed"] },
+        "summary": { "type": "string", "minLength": 1 },
+        "changed_files": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["argv", "exit_code", "summary"],
+            "properties": {
+              "argv": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+              "exit_code": { "type": "integer" },
+              "summary": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["criterion", "evidence"],
+            "properties": {
+              "criterion": { "type": "string", "minLength": 1 },
+              "evidence": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "remaining_risks": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "implemented" } } },
+          "then": { "required": ["summary", "changed_files", "commands", "acceptance_criteria", "remaining_risks"] },
+          "else": { "required": ["reason"] }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "review": {
+      "type": "object",
+      "required": ["verdict", "findings", "missing_verification", "pr_claims_supported"],
+      "properties": {
+        "verdict": { "enum": ["approve", "revise", "abandon"] },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["severity", "summary", "evidence"],
+            "properties": {
+              "severity": { "enum": ["blocker", "major", "minor"] },
+              "summary": { "type": "string", "minLength": 1 },
+              "evidence": { "type": "string", "minLength": 1 },
+              "path": { "type": ["string", "null"], "minLength": 1 }
+            }
+          }
+        },
+        "missing_verification": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "pr_claims_supported": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "prWriter": {
+      "type": "object",
+      "required": ["title", "body"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 60000 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

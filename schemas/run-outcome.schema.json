@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.dev/schemas/run-outcome.schema.json",
+  "title": "Leftovers run outcome",
+  "type": "object",
+  "required": ["run_id", "stage", "message", "tests"],
+  "properties": {
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+    "stage": { "type": "string" },
+    "issue_ref": { "type": ["string", "null"] },
+    "score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "failure_code": { "type": ["string", "null"] },
+    "message": { "type": "string" },
+    "pr_url": { "type": ["string", "null"] },
+    "branch": { "type": ["string", "null"] },
+    "tests": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": false
+}

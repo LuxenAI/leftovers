@@ -1,0 +1,123 @@
+version = 1
+state_dir = ".leftovers/state"
+temp_root = ".leftovers/workspaces"
+
+[github]
+api_url = "https://api.github.com"
+token_env = "GITHUB_TOKEN"
+api_version = "2026-03-10"
+request_timeout_seconds = 20
+max_read_requests_per_run = 500
+
+[budget]
+# Consumer subscriptions frequently expose no supported quota API. This value must come from a
+# manual snapshot or a provider's official adapter; Leftovers never scrapes a quota UI.
+source = "fixed"
+fixed_remaining_tokens = 150000
+# Explicit operator/provider window ceiling. Leave unset rather than guessing when unknown.
+maximum_tokens = 150000
+reserve_tokens = 20000
+minimum_spendable_tokens = 30000
+safety_multiplier = 1.25
+window = "daily"
+timezone = "America/Phoenix"
+reset_hour = 0
+# Monday=0 through Sunday=6; used only for weekly windows.
+reset_weekday = 0
+max_run_seconds = 3600
+reset_safety_seconds = 300
+
+[discovery]
+query = 'is:issue is:open no:assignee -linked:pr label:"help wanted"'
+per_repo_limit = 20
+max_candidates = 100
+
+[scoring]
+minimum_score = 55
+repository_impact_weight = 0.28
+urgency_weight = 0.22
+user_demand_weight = 0.15
+maintainer_signal_weight = 0.15
+tractability_weight = 0.12
+neglect_weight = 0.08
+technical_risk_penalty = 0.20
+collision_risk_penalty = 0.12
+scope_uncertainty_penalty = 0.08
+
+[policy]
+require_unassigned = true
+require_no_open_linked_pr = true
+require_license = true
+max_changed_files = 20
+max_changed_lines = 1200
+max_patch_bytes = 1000000
+ai_policy_max_age_days = 90
+deny_labels = ["security", "vulnerability", "legal", "needs-design", "breaking-change", "wontfix"]
+forbid_paths = [".github/workflows/**", "SECURITY.md", "CODEOWNERS", ".gitmodules", ".gitattributes", "**/*.pem", "**/*.key"]
+forbid_dependency_changes = true
+
+[sandbox]
+runtime = "docker"
+# Replace this development tag with a trusted image digest before autonomous use.
+image = "leftovers-sandbox:latest"
+network = "none"
+memory = "4g"
+cpus = 2.0
+pids_limit = 256
+timeout_seconds = 1800
+tmpfs_size = "512m"
+
+[agent]
+backend = "container"
+# Build a provider-specific derivative of sandbox/Dockerfile that exposes this command and writes
+# strict JSON to LEFTOVERS_RESULT_PATH. Never add GitHub credentials to that image.
+command = ["your-agent-cli", "--prompt-stdin"]
+provider = "unconfigured"
+model = "unconfigured"
+# Require these only after the chosen adapter implements the strict telemetry protocol.
+checkin_required = false
+usage_reporting_required = false
+checkin_timeout_seconds = 30
+heartbeat_timeout_seconds = 120
+timeout_seconds = 3600
+max_output_bytes = 65536
+estimated_tokens_p50 = 40000
+estimated_tokens_p95 = 80000
+max_repair_cycles = 1
+pass_environment = []
+
+[publication]
+mode = "dry-run"
+external_writes_acknowledged = false
+require_cli_flag = true
+draft = true
+fork = true
+branch_prefix = "leftovers"
+disclose_ai_assistance = true
+max_prs_per_window = 1
+max_open_prs_per_repository = 1
+repository_cooldown_days = 7
+# Required, together with a digest-pinned image, before changing mode to "draft-pr".
+expected_login = "leftovers-contributor"
+expected_user_id = 123456789
+
+# Curate repositories; never let issue text add a repository or command. Explicitly confirm the
+# project's current AI-contribution policy before setting ai_contributions_allowed = true.
+[[repositories]]
+slug = "example/impactful-project"
+enabled = true
+importance = 0.85
+default_branch = "main"
+allowed_licenses = ["Apache-2.0", "MIT", "BSD-3-Clause"]
+allow_labels = ["help wanted", "good first issue"]
+deny_labels = ["needs maintainer decision"]
+setup_commands = []
+test_commands = [["python", "-m", "pytest", "-q"]]
+forbid_paths = ["infra/**", "releases/**"]
+max_changed_files = 12
+max_changed_lines = 600
+network = "none"
+require_human_approval = false
+ai_contributions_allowed = true
+ai_policy_url = "https://github.com/example/impactful-project/blob/main/CONTRIBUTING.md"
+ai_policy_checked_at = "2026-07-17"

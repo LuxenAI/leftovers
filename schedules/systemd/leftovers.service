@@ -1,0 +1,17 @@
+[Unit]
+Description=Run one bounded Leftovers contribution cycle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/ABSOLUTE/PATH/TO/Leftovers
+ExecStart=/ABSOLUTE/PATH/TO/Leftovers/scripts/run-cycle.sh
+Environment=LEFTOVERS_ENV_FILE=/ABSOLUTE/PATH/TO/Leftovers/.leftovers/scheduler.env
+Environment=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/ABSOLUTE/PATH/TO/Leftovers/.leftovers
+UMask=0077

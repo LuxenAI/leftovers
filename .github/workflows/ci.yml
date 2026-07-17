@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  container-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build installed-wheel smoke image
+        run: >-
+          docker build --target package-smoke
+          --tag leftovers-package-smoke:${{ github.sha }} .
+      - name: Verify installed wheel, console script, and package data
+        run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --security-opt no-new-privileges=true
+          leftovers-package-smoke:${{ github.sha }}
+      - name: Build test image
+        run: docker build --tag leftovers-test:${{ github.sha }} .
+      - name: Run offline tests
+        run: docker run --rm --network none leftovers-test:${{ github.sha }}
+      - name: Build sandbox base
+        run: docker build --file sandbox/Dockerfile --tag leftovers-sandbox:${{ github.sha }} .
+      - name: Build deterministic rehearsal image
+        run: >-
+          docker build --file sandbox/Rehearsal.Dockerfile
+          --build-arg BASE_IMAGE=leftovers-sandbox:${{ github.sha }}
+          --tag leftovers-rehearsal:${{ github.sha }} .
+      - name: Run the real OCI training cycle
+        run: |
+          PYTHONPATH=src python3 -m leftovers \
+            --config config/leftovers.example.toml training-run \
+            --mode docker --image leftovers-rehearsal:${{ github.sha }} \
+            --profile auto --report /tmp/leftovers-report/rehearsal.json
+      - name: Verify rehearsal evidence and cleanup
+        run: |
+          python3 -c 'import json, pathlib, sys; p=json.load(open(sys.argv[1], encoding="utf-8")); assert p["success"] is True; assert p["execution_profile"] == "oci-container"; assert p["synthetic"] is True; assert all(c["ok"] is True for c in p["checks"]); assert not list(pathlib.Path(p["temp_root"]).glob("leftovers-*"))' /tmp/leftovers-report/rehearsal.json
+      - name: Prove no managed container remains
+        if: always()
+        run: |
+          if test -n "$(docker ps --all --quiet --filter label=io.leftovers.managed=true)"; then
+            docker ps --all --filter label=io.leftovers.managed=true
+            exit 1
+          fi
