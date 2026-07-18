@@ -69,6 +69,8 @@ tmpfs_size = "512m"
 
 [agent]
 backend = "container"
+# For the guided first-party Codex CLI backend, generate a separate owner-only config with
+# `leftovers --config config/leftovers.toml setup codex`; do not hand-copy saved auth into this file.
 # Build a provider-specific derivative of sandbox/Dockerfile that exposes this command and writes
 # strict JSON to LEFTOVERS_RESULT_PATH. Never add GitHub credentials to that image.
 command = ["your-agent-cli", "--prompt-stdin"]

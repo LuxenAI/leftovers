@@ -18,6 +18,16 @@ from pathlib import Path
 from typing import Any
 
 from .audit import redact
+from .codex_adapter import (
+    CODEX_ADAPTER_VERSION,
+    CodexAdapterError,
+    build_codex_argv,
+    codex_process_environment,
+    parse_codex_usage,
+    resolve_codex_executable,
+    validate_codex_workspace,
+    write_stage_schema,
+)
 from .config import AgentConfig, SandboxConfig
 from .models import AgentResult, CommandResult, TokenUsage, isoformat, utc_now
 from .prompts import RenderedPrompt
@@ -336,6 +346,39 @@ def _bounded(value: str, maximum: int) -> str:
     return "[TRUNCATED]\n" + value[-maximum:]
 
 
+def _append_adapter_telemetry(path: Path, event: dict[str, Any]) -> None:
+    encoded = (json.dumps(event, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    if len(encoded) > _TELEMETRY_MAX_LINE_BYTES:
+        raise AgentOutputError("adapter telemetry line is oversized")
+    flags = (
+        os.O_WRONLY
+        | os.O_APPEND
+        | os.O_CREAT
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+        ):
+            raise AgentOutputError("adapter telemetry must be an owner-controlled regular file")
+        if info.st_size + len(encoded) > _TELEMETRY_MAX_BYTES:
+            raise AgentOutputError("adapter telemetry exceeds the byte limit")
+        os.fchmod(descriptor, 0o600)
+        pending = memoryview(encoded)
+        while pending:
+            written = os.write(descriptor, pending)
+            if written < 1:
+                raise AgentOutputError("adapter telemetry write made no progress")
+            pending = pending[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def execute(
     argv: list[str],
     *,
@@ -615,7 +658,8 @@ class AgentRunner:
         telemetry_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentResult:
         output_dir, result_path, telemetry_path = self._output(workspace, stage)
-        for stale_path in (result_path, telemetry_path):
+        schema_path = output_dir / "result.schema.json"
+        for stale_path in (result_path, telemetry_path, schema_path):
             if stale_path.exists():
                 stale_path.unlink()
         monitor = _AdapterTelemetryMonitor(
@@ -624,8 +668,44 @@ class AgentRunner:
             telemetry_callback,
             allow_synthetic_usage=self.allow_synthetic_usage,
         )
+        codex_sequence = 0
+        codex_heartbeat_at = time.monotonic()
+
+        def append_codex_event(event_type: str, **fields: Any) -> None:
+            nonlocal codex_sequence
+            codex_sequence += 1
+            _append_adapter_telemetry(
+                telemetry_path,
+                {
+                    "version": 1,
+                    "sequence": codex_sequence,
+                    "type": event_type,
+                    **fields,
+                    "observed_at": isoformat(utc_now()),
+                },
+            )
+
+        if self.agent.backend == "codex-cli":
+            try:
+                validate_codex_workspace(workspace)
+            except CodexAdapterError as exc:
+                raise RunnerError(str(exc)) from exc
+            append_codex_event(
+                "checkin",
+                provider=self.agent.provider,
+                model=self.agent.model,
+                adapter_version=CODEX_ADAPTER_VERSION,
+                capabilities=["structured-output", "provider-usage", "permission-profile"],
+            )
 
         def telemetry_tick() -> None:
+            nonlocal codex_heartbeat_at
+            if (
+                self.agent.backend == "codex-cli"
+                and time.monotonic() - codex_heartbeat_at >= 30
+            ):
+                append_codex_event("heartbeat")
+                codex_heartbeat_at = time.monotonic()
             if telemetry_callback is not None:
                 telemetry_callback(
                     {
@@ -657,6 +737,73 @@ class AgentRunner:
                 timeout=_effective_timeout(self.agent.timeout_seconds, deadline),
                 on_tick=telemetry_tick,
             )
+        elif self.agent.backend == "codex-cli":
+            executable = resolve_codex_executable(self.agent.command[0])
+            if executable is None:
+                raise RunnerError(
+                    "Codex CLI is not installed or its configured path is unavailable"
+                )
+            config_path = workspace / ".git/config"
+            local_config_before = config_path.read_bytes()
+            before = self._host_readonly_fingerprint(workspace) if read_only_workspace else None
+            prompt_text = prompt.text.replace("{{LEFTOVERS_RESULT_PATH}}", str(result_path))
+            try:
+                isolated_home = workspace.parent / "codex-agent-home"
+                isolated_home.mkdir(mode=0o700, exist_ok=True)
+                home_info = isolated_home.lstat()
+                if (
+                    not stat.S_ISDIR(home_info.st_mode)
+                    or stat.S_ISLNK(home_info.st_mode)
+                    or home_info.st_uid != os.getuid()
+                ):
+                    raise CodexAdapterError("Codex isolated home is not owner-controlled")
+                os.chmod(isolated_home, 0o700)
+                write_stage_schema(schema_path, stage)
+                codex_argv = build_codex_argv(
+                    executable,
+                    stage=stage,
+                    workspace=workspace,
+                    schema_path=schema_path,
+                    result_path=result_path,
+                    model=self.agent.model,
+                    read_only_workspace=read_only_workspace,
+                )
+                command_result = execute(
+                    codex_argv,
+                    cwd=workspace,
+                    env=codex_process_environment(isolated_home),
+                    stdin=prompt_text,
+                    timeout=_effective_timeout(self.agent.timeout_seconds, deadline),
+                    max_output_bytes=self.agent.max_output_bytes,
+                    on_tick=telemetry_tick,
+                )
+                if command_result.passed:
+                    usage = parse_codex_usage(command_result.stdout_tail)
+                    append_codex_event(
+                        "usage",
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cached_input_tokens=usage.cached_input_tokens,
+                        reasoning_tokens=usage.reasoning_tokens,
+                        total_tokens=usage.total_tokens,
+                        source=usage.source,
+                        exact=usage.exact,
+                        final=True,
+                    )
+            except CodexAdapterError as exc:
+                raise RunnerError(str(exc)) from exc
+            if not config_path.is_file() or config_path.read_bytes() != local_config_before:
+                raise RunnerError(f"Codex agent modified Git control metadata during {stage}")
+            from .policy import unsafe_git_configuration
+
+            dangerous_config = unsafe_git_configuration(workspace)
+            if dangerous_config:
+                raise RunnerError(
+                    "repository contains unsafe local Git configuration: "
+                    + ", ".join(dangerous_config)
+                )
+            if before is not None and self._host_readonly_fingerprint(workspace) != before:
+                raise RunnerError(f"Codex agent modified the workspace during read-only {stage}")
         else:
             config_path = workspace / ".git/config"
             local_config_before = config_path.read_bytes()

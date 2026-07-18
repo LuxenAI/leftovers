@@ -30,6 +30,11 @@ and partial publication or cleanup failures.
 - GitHub issue/base state is rechecked before publication.
 - Publisher uses an isolated Git HOME, disabled hooks/credential helpers, an ephemeral askpass script,
   and a token held only in its subprocess environment.
+- The first-party Codex CLI dry-run backend accepts no user CLI flags or environment pass-through,
+  disables automatic instruction/config/rule/hook/app/network surfaces, uses stage-specific
+  least-privilege permission profiles, and converts only closed-schema output and bounded usage
+  telemetry. Repository-local Codex skills are refused, execution uses an empty isolated home, and
+  ambient GitHub, provider-token, SSH-agent, and cloud credentials are not forwarded.
 - Publisher identity must match configured expected login and immutable GitHub user ID before writes.
 - Container removal requires exact managed/job/stage labels and a post-removal absence check;
   workspace deletion runs only afterward and requires a managed marker, expected prefix, and
@@ -60,7 +65,7 @@ Do not describe these as solved:
   human accepts the supply-chain/exfiltration risk.
 - Agent provider authentication is deployment-specific. Baking credentials into an image is unsafe.
   Prefer a model/tool broker or a provider CLI whose own sandbox keeps credentials outside tool
-  reach. The host backend is lower assurance.
+  reach. Host and Codex CLI backends are lower assurance and cannot publish.
 - Secret regexes are not proof of absence. Production should add a dedicated scanner and entropy/
   historical-secret checks.
 - Sensitive-issue label and text matching is a conservative gate, not semantic proof that an issue

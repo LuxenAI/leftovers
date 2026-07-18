@@ -13,10 +13,18 @@ from typing import Any
 
 from .audit import redact
 from .budget import BudgetLedger
+from .codex_adapter import inspect_codex_cli
 from .config import AppConfig, ConfigError, load_config
 from .dashboard import DashboardUnavailable, serve_dashboard
 from .github import FixtureIssueSource, GitHubClient, GitHubError
 from .models import RunStage
+from .onboarding import (
+    DEFAULT_CODEX_MODEL,
+    CodexSetupInputs,
+    container_image_available,
+    parse_argv_json,
+    setup_codex,
+)
 from .orchestrator import ContributionOrchestrator, ranked_to_dict
 from .publisher import GhPublisher, PublicationError
 from .rehearsal import (
@@ -60,6 +68,50 @@ def _parser() -> argparse.ArgumentParser:
         help="TOML configuration path (default: config/leftovers.toml)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    setup = subparsers.add_parser(
+        "setup", help="create a new dry-run configuration with guided prerequisite checks"
+    )
+    setup.add_argument("provider", choices=("codex",))
+    setup.add_argument("--repository", help="allowlisted GitHub repository as owner/name")
+    setup.add_argument("--ai-policy-url", help="reviewed HTTPS AI-contribution policy URL")
+    setup.add_argument(
+        "--ai-policy-reviewed",
+        action="store_true",
+        help="confirm that the policy URL was reviewed and currently permits AI assistance",
+    )
+    setup.add_argument(
+        "--test-command-json",
+        action="append",
+        default=[],
+        help='reviewed offline test argv as JSON, for example ["python","-m","pytest","-q"]',
+    )
+    setup.add_argument(
+        "--allowed-license",
+        action="append",
+        default=[],
+        help="reviewed SPDX license identifier; repeat when needed",
+    )
+    setup.add_argument(
+        "--allow-label",
+        action="append",
+        default=[],
+        help="maintainer-signal issue label; defaults to help wanted and good first issue",
+    )
+    setup.add_argument("--default-branch", default="main")
+    setup.add_argument("--model", default=DEFAULT_CODEX_MODEL)
+    setup.add_argument(
+        "--allocated-tokens",
+        type=_bounded_integer(100_000, 10_000_000, "allocated tokens"),
+        help="explicit daily or weekly token envelope allocated to Leftovers",
+    )
+    setup.add_argument(
+        "--reserve-tokens",
+        type=_bounded_integer(0, 9_900_000, "reserve tokens"),
+        default=20_000,
+    )
+    setup.add_argument("--window", choices=("daily", "weekly"), default="daily")
+    setup.add_argument("--timezone", default="America/Phoenix")
+    setup.add_argument("--runtime", choices=("docker", "podman"), default="docker")
     subparsers.add_parser("validate", help="validate configuration and exit")
     subparsers.add_parser("doctor", help="check local runtime prerequisites without remote writes")
 
@@ -149,6 +201,67 @@ def _source(config: AppConfig, fixture: Path | None) -> FixtureIssueSource | Git
     return FixtureIssueSource(fixture.resolve()) if fixture else GitHubClient(config.github)
 
 
+def _prompt_required(value: str | None, label: str) -> str:
+    if value and value.strip():
+        return value.strip()
+    if not sys.stdin.isatty():
+        raise ConfigError(f"setup requires --{label.replace('_', '-')}")
+    response = input(f"{label.replace('_', ' ').capitalize()}: ").strip()
+    if not response:
+        raise ConfigError(f"setup requires {label.replace('_', ' ')}")
+    return response
+
+
+def _setup_inputs(args: argparse.Namespace) -> CodexSetupInputs:
+    repository = _prompt_required(args.repository, "repository")
+    ai_policy_url = _prompt_required(args.ai_policy_url, "ai_policy_url")
+    reviewed = args.ai_policy_reviewed
+    if not reviewed and sys.stdin.isatty():
+        answer = input(
+            "Have you reviewed that policy and confirmed AI-assisted contributions are allowed? "
+            "[y/N]: "
+        ).strip()
+        reviewed = answer.casefold() in {"y", "yes"}
+    raw_commands = list(args.test_command_json)
+    if not raw_commands and sys.stdin.isatty():
+        raw_commands.append(
+            input('Offline test argv JSON (for example ["python","-m","pytest","-q"]): ')
+        )
+    commands = tuple(parse_argv_json(value) for value in raw_commands)
+    licenses = list(args.allowed_license)
+    if not licenses and sys.stdin.isatty():
+        licenses = [
+            item.strip()
+            for item in input("Reviewed SPDX license identifier(s), comma-separated: ").split(",")
+            if item.strip()
+        ]
+    allocated_tokens = args.allocated_tokens
+    if allocated_tokens is None and sys.stdin.isatty():
+        raw_tokens = input("Token envelope allocated to Leftovers [150000]: ").strip() or "150000"
+        try:
+            allocated_tokens = int(raw_tokens)
+        except ValueError as exc:
+            raise ConfigError("allocated tokens must be an integer") from exc
+    if allocated_tokens is None:
+        raise ConfigError("setup requires --allocated-tokens")
+    labels = tuple(args.allow_label or ("help wanted", "good first issue"))
+    return CodexSetupInputs(
+        repository=repository,
+        ai_policy_url=ai_policy_url,
+        ai_policy_reviewed=reviewed,
+        test_commands=commands,
+        allowed_licenses=tuple(licenses),
+        allow_labels=labels,
+        default_branch=args.default_branch,
+        model=args.model,
+        allocated_tokens=allocated_tokens,
+        reserve_tokens=args.reserve_tokens,
+        window=args.window,
+        timezone=args.timezone,
+        runtime=args.runtime,
+    )
+
+
 def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
     checks: list[dict[str, Any]] = []
 
@@ -174,6 +287,12 @@ def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
         f"{config.sandbox.runtime} is required for container-agent and verification stages",
     )
     add(
+        "sandbox_image",
+        runtime_present
+        and container_image_available(config.sandbox.runtime, config.sandbox.image),
+        f"configured image {config.sandbox.image} must already exist locally",
+    )
+    add(
         "pinned_image",
         "@sha256:" in config.sandbox.image,
         "production/VM profiles should pin the sandbox image by digest",
@@ -182,9 +301,31 @@ def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
     add(
         "agent_backend",
         config.agent.backend == "container",
-        "host agents rely on the provider CLI's own sandbox and are a lower-assurance profile",
+        "host and Codex CLI agents remain dry-run, lower-assurance profiles",
         severity="warning",
     )
+    if config.agent.backend == "codex-cli":
+        inspection = inspect_codex_cli(config.agent.command[0], config.agent.model)
+        add(
+            "codex_cli",
+            inspection.executable is not None,
+            "Codex CLI must be installed at the configured path",
+        )
+        add(
+            "codex_version",
+            inspection.version_supported,
+            "Codex CLI 0.145.0 or newer is required by the hardened adapter",
+        )
+        add(
+            "codex_login",
+            inspection.authenticated,
+            "Codex CLI must report an active saved login",
+        )
+        add(
+            "codex_model",
+            inspection.model_available,
+            f"configured model {config.agent.model} must exist in the bundled model catalog",
+        )
     add(
         "rootless_runtime",
         False,
@@ -375,6 +516,12 @@ def _training_payload(args: argparse.Namespace, config: AppConfig) -> tuple[int,
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "setup":
+            if args.provider != "codex":
+                raise ConfigError("unsupported setup provider")
+            status, payload = setup_codex(args.config, _setup_inputs(args))
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return status
         config = load_config(args.config)
         if args.command == "validate":
             print(json.dumps({"valid": True, "config": str(args.config.resolve())}, indent=2))

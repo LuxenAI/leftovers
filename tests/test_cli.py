@@ -26,6 +26,40 @@ class _FakeRehearsalReport:
 
 
 class CliTests(unittest.TestCase):
+    def test_setup_codex_does_not_require_an_existing_config(self) -> None:
+        stdout = io.StringIO()
+        report = {"configured": True, "ready": True}
+        with (
+            patch("leftovers.cli.load_config", side_effect=AssertionError("must not load")),
+            patch("leftovers.cli.setup_codex", return_value=(0, report)) as setup,
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--config",
+                    "new.toml",
+                    "setup",
+                    "codex",
+                    "--repository",
+                    "owner/repo",
+                    "--ai-policy-url",
+                    "https://github.com/owner/repo/blob/main/CONTRIBUTING.md",
+                    "--ai-policy-reviewed",
+                    "--allowed-license",
+                    "MIT",
+                    "--test-command-json",
+                    '["python","-m","unittest"]',
+                    "--allocated-tokens",
+                    "150000",
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), report)
+        inputs = setup.call_args.args[1]
+        self.assertEqual(inputs.repository, "owner/repo")
+        self.assertEqual(inputs.test_commands, (("python", "-m", "unittest"),))
+        self.assertTrue(inputs.ai_policy_reviewed)
+
     def test_cleanup_protects_container_and_reserved_controller_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

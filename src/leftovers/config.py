@@ -568,8 +568,8 @@ def _validate(config: AppConfig) -> None:
         and 1 <= config.sandbox.timeout_seconds <= 7_200
     ):
         raise ConfigError("sandbox resource limits are outside conservative bounds")
-    if config.agent.backend not in {"container", "host"}:
-        raise ConfigError("agent.backend must be container or host")
+    if config.agent.backend not in {"container", "host", "codex-cli"}:
+        raise ConfigError("agent.backend must be container, host, or codex-cli")
     if not config.agent.command:
         raise ConfigError("agent.command must be a non-empty argv array")
     if not config.agent.command[0].strip():
@@ -588,6 +588,20 @@ def _validate(config: AppConfig) -> None:
         len(argument) > 4_096 or "\0" in argument for argument in config.agent.command
     ):
         raise ConfigError("agent.command exceeds the argv safety limits")
+    if config.agent.backend == "codex-cli":
+        executable_name = Path(config.agent.command[0]).name.casefold()
+        if len(config.agent.command) != 1 or executable_name not in {"codex", "codex.exe"}:
+            raise ConfigError(
+                "codex-cli backend command must contain only the Codex executable path"
+            )
+        if config.agent.provider != "openai-codex-cli":
+            raise ConfigError("codex-cli backend provider must be openai-codex-cli")
+        if config.agent.model == "unconfigured":
+            raise ConfigError("codex-cli backend requires an explicit model")
+        if not config.agent.checkin_required or not config.agent.usage_reporting_required:
+            raise ConfigError("codex-cli backend requires check-in and usage reporting")
+        if config.agent.pass_environment:
+            raise ConfigError("codex-cli backend does not accept pass_environment entries")
     if any(_ENVIRONMENT_NAME.fullmatch(name) is None for name in config.agent.pass_environment):
         raise ConfigError("agent.pass_environment contains an invalid variable name")
     if (
@@ -634,7 +648,9 @@ def _validate(config: AppConfig) -> None:
     if config.publication.mode == "draft-pr" and not config.publication.draft:
         raise ConfigError("v1 only publishes draft PRs")
     if config.publication.mode == "draft-pr" and config.agent.backend != "container":
-        raise ConfigError("draft publication requires the container agent backend")
+        raise ConfigError(
+            "draft publication requires the container agent backend; codex-cli is dry-run only"
+        )
     if (
         config.publication.mode == "draft-pr"
         and _PINNED_IMAGE.fullmatch(config.sandbox.image) is None

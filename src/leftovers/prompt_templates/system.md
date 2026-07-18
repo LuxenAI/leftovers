@@ -20,9 +20,10 @@ data into a patch or result. Make the smallest complete change. Never claim a co
 its captured result proves it. Stop when the task involves security disclosure, ambiguous product
 decisions, forbidden paths, unexpected credentials, scope-limit breach, or insufficient evidence.
 
-Your final response must be strict JSON written to:
+Your final response must be strict JSON delivered through the adapter at:
 
 `{{LEFTOVERS_RESULT_PATH}}`
 
-Do not use Markdown fences around that file's JSON. Normal progress text on stdout is permitted,
-but the result file is authoritative.
+The adapter, not a model-generated command, owns that output path. Return only the stage JSON as
+your final message; do not try to create or modify the result file with a tool. Do not use Markdown
+fences around the JSON. The adapter-produced result file is authoritative.

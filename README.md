@@ -19,6 +19,8 @@ review—not more unsolicited pull requests.
   runs too close to reset are rejected.
 - Planning and implementation prompt contracts, fresh independent review, and deterministic
   controller-rendered draft-PR text from verified evidence.
+- Guided, owner-only Codex CLI setup plus a first-party execute-only adapter that uses a saved Codex
+  login, strict structured output, least-privilege permission profiles, and provider usage receipts.
 - Docker/Podman command construction with no GitHub credential in the worker.
 - Offline operator-curated verification commands plus structural rename/file-mode, dependency,
   license, secret, size, and forbidden-path gates.
@@ -78,6 +80,20 @@ or broker cutoff when the provider supports one.
 
 ## Quick start
 
+For the shortest supported execute-only path with a ChatGPT Codex plan, run the guided wizard:
+
+```sh
+leftovers --config config/leftovers.toml setup codex
+```
+
+It checks Python, Git, a read-only GitHub discovery token, Codex login/version/model, `gh`, the
+container runtime, and the local sandbox image; asks the operator to confirm the allowlisted
+repository, AI policy, license, offline test argv, and quota allocation; and creates a new owner-only
+config in `dry-run` mode. It does not install packages, copy tokens, overwrite a config, schedule
+runs, or enable publication. See [`docs/CODEX_CLI.md`](docs/CODEX_CLI.md).
+
+For a generic container provider adapter:
+
 1. Copy and curate the example configuration:
 
    ```sh
@@ -119,11 +135,12 @@ or broker cutoff when the provider supports one.
    PYTHONPATH=src python3 -m leftovers --config config/leftovers.toml run --execute
    ```
 
-Execution requires the configured agent command and container runtime. The stock sandbox image does
-not embed a model provider or credentials; derive a provider-specific image or use a trusted host
-CLI with its own sandbox. No runnable provider adapter ships in v0.1, and the host option is
-explicitly lower assurance. See [`docs/AGENT_ADAPTERS.md`](docs/AGENT_ADAPTERS.md) for the exact
-stdin/result-file contract and credential tradeoffs.
+Execution requires the configured agent and container runtime. The stock sandbox image does not
+embed a model provider or credentials. The first-party Codex CLI backend is execute-only and uses
+the host CLI's saved login plus least-privilege permission profiles; generic providers still require
+a reviewed adapter image or trusted host CLI. Host and Codex CLI backends remain lower assurance and
+cannot enable draft publication. See [`docs/AGENT_ADAPTERS.md`](docs/AGENT_ADAPTERS.md) for the exact
+contract and credential tradeoffs.
 
 ## Prove the control plane before using it
 
@@ -218,6 +235,7 @@ remaining v0.1 gaps in [`SECURITY.md`](SECURITY.md) before enabling writes.
 - [`PROTOCOL.md`](PROTOCOL.md): prompt/result contracts and state invariants.
 - [`SECURITY.md`](SECURITY.md): threat model, hard gates, and assurance limits.
 - [`docs/AGENT_ADAPTERS.md`](docs/AGENT_ADAPTERS.md): provider adapter contract and v0.1 limits.
+- [`docs/CODEX_CLI.md`](docs/CODEX_CLI.md): guided Codex setup, execution boundary, and limits.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md): activation, scheduler installation, and recovery.
 - [`docs/TELEMETRY.md`](docs/TELEMETRY.md): exact quota/check-in semantics, dashboard boundary, and
   rehearsal evidence.

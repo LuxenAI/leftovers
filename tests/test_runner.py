@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -20,6 +21,78 @@ from leftovers.runner import (
 
 
 class RunnerTests(unittest.TestCase):
+    def test_codex_cli_backend_converts_structured_output_and_usage(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root))
+        workspace = root / "repo"
+        workspace.mkdir()
+        subprocess = __import__("subprocess")
+        subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+        runner = AgentRunner(
+            SandboxConfig(runtime="docker", image="image@sha256:abc"),
+            AgentConfig(
+                backend="codex-cli",
+                command=("codex",),
+                provider="openai-codex-cli",
+                model="gpt-5.6-luna",
+                checkin_required=True,
+                usage_reporting_required=True,
+            ),
+        )
+        result_payload = {
+            "status": "implemented",
+            "summary": "implemented fixture",
+            "changed_files": ["example.py"],
+            "commands": [],
+            "acceptance_criteria": [{"criterion": "works", "evidence": "fixture"}],
+            "remaining_risks": [],
+            "reason": "",
+        }
+        captured: dict[str, object] = {}
+
+        def fake_execute(argv: list[str], **kwargs: object) -> CommandResult:
+            captured["argv"] = argv
+            captured["env"] = kwargs["env"]
+            result_path = Path(argv[argv.index("--output-last-message") + 1])
+            result_path.write_text(json.dumps(result_payload))
+            usage_event = {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 25,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 5,
+                },
+            }
+            return CommandResult(tuple(argv), 0, 0.01, json.dumps(usage_event), "")
+
+        events: list[dict[str, object]] = []
+        with (
+            mock.patch("leftovers.runner.resolve_codex_executable", return_value="/usr/bin/codex"),
+            mock.patch("leftovers.runner.execute", side_effect=fake_execute),
+        ):
+            result = runner.run_agent(
+                "implementation",
+                workspace,
+                RenderedPrompt("implementation", "task", "0" * 64),
+                "run-1",
+                read_only_workspace=False,
+                telemetry_callback=events.append,
+            )
+        self.assertEqual(result.status, "implemented")
+        self.assertIsNotNone(result.usage)
+        assert result.usage is not None
+        self.assertEqual(result.usage.total_tokens, 120)
+        self.assertEqual([event["type"] for event in events], ["checkin", "usage"])
+        argv = captured["argv"]
+        self.assertIsInstance(argv, list)
+        self.assertIn('default_permissions="leftovers-write"', argv)
+        environment = captured["env"]
+        self.assertIsInstance(environment, dict)
+        self.assertNotIn("GITHUB_TOKEN", environment)
+        self.assertNotIn("CODEX_ACCESS_TOKEN", environment)
+        self.assertEqual(Path(environment["HOME"]).name, "codex-agent-home")
+
     def test_host_agent_git_config_mutation_is_rejected_before_controller_git(self) -> None:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(root))
