@@ -223,6 +223,34 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class SbxConfig:
+    """Pinned Docker Sandboxes identity and future execution limits.
+
+    The section deliberately has no template, kit, profile, extra-workspace,
+    port, secret, environment, or arbitrary-command fields.  Those surfaces
+    would let repository text expand the VM's authority.  The current shell
+    compatibility probe consumes only the CLI identity and its bounded
+    per-command timeout; the remaining values are source-disabled staging
+    intent, not observed runtime evidence.
+    """
+
+    binary_path: str = ""
+    binary_sha256: str = ""
+    version: str = ""
+    revision: str = ""
+    agent: str = "codex"
+    clone_mode_required: bool = True
+    cpus: int = 2
+    memory: str = "4g"
+    create_timeout_seconds: int = 300
+    stage_timeout_seconds: int = 1_200
+    cleanup_timeout_seconds: int = 120
+    max_output_bytes: int = 65_536
+    network_policy: str = "locked-down-openai-only"
+    reasoning_effort: str = "high"
+
+
+@dataclass(frozen=True)
 class StrictVMConfig:
     """Pinned, bounded inputs for the future whole-cycle VM backend.
 
@@ -270,11 +298,11 @@ class MediatorConfig:
     provider: str = "openai-subscription"
     model: str = "gpt-5.6-terra"
     reasoning_effort: str = "high"
-    max_calls: int = 12
-    per_call_timeout_seconds: int = 360
-    max_prompt_bytes: int = 262_144
+    max_calls: int = 3
+    per_call_timeout_seconds: int = 1_200
+    max_prompt_bytes: int = 20_904
     max_response_bytes: int = 65_536
-    total_token_cap: int = 65_000
+    total_token_cap: int = 55_000
 
 
 @dataclass(frozen=True)
@@ -327,6 +355,7 @@ class AppConfig:
     sandbox: SandboxConfig
     agent: AgentConfig
     publication: PublicationConfig
+    sbx: SbxConfig = field(default_factory=SbxConfig)
     strict_vm: StrictVMConfig = field(default_factory=StrictVMConfig)
     mediator: MediatorConfig = field(default_factory=MediatorConfig)
     repositories: tuple[RepositoryConfig, ...] = field(default_factory=tuple)
@@ -357,12 +386,27 @@ def production_isolation_violations(config: AppConfig) -> tuple[str, ...]:
         )
     if config.agent.pass_environment:
         violations.append("agent.pass_environment must be empty")
-    if config.agent.backend != "strict-vm":
-        violations.append("agent.backend must be strict-vm for unattended production")
-    if not config.strict_vm.enabled:
-        violations.append("strict_vm.enabled must be true for unattended production")
-    if config.mediator.backend != "inference-only-v1":
-        violations.append("no credential-isolating inference-only mediator is implemented")
+    if config.agent.backend != "sbx":
+        violations.append("agent.backend must be sbx for unattended production")
+    if config.strict_vm.enabled:
+        violations.append("strict_vm is archived and cannot be combined with the sbx backend")
+    if not config.sbx.clone_mode_required:
+        violations.append("sbx clone mode must be mandatory")
+    if not all(
+        (
+            config.sbx.binary_path,
+            config.sbx.binary_sha256,
+            config.sbx.version,
+            config.sbx.revision,
+        )
+    ):
+        violations.append("sbx binary identity must be fully pinned")
+    # This is deliberately unconditional for now.  A TOML value cannot turn
+    # an external daemon/proxy into live boundary evidence.
+    violations.append(
+        "Docker Sandboxes production execution is disabled pending live clone, policy, "
+        "credential, result-extraction, and cleanup evidence"
+    )
     return tuple(violations)
 
 
@@ -377,6 +421,7 @@ _SECTIONS = {
     "policy",
     "sandbox",
     "agent",
+    "sbx",
     "strict_vm",
     "mediator",
     "publication",
@@ -567,6 +612,7 @@ def load_config(path: str | Path) -> AppConfig:
     policy_raw = _section(data, "policy")
     sandbox_raw = _section(data, "sandbox")
     agent_raw = _section(data, "agent")
+    sbx_raw = _section(data, "sbx")
     strict_vm_raw = _section(data, "strict_vm")
     mediator_raw = _section(data, "mediator")
     publication_raw = _section(data, "publication")
@@ -618,6 +664,7 @@ def load_config(path: str | Path) -> AppConfig:
         policy=_make(PolicyConfig, policy_raw, "policy"),
         sandbox=_make(SandboxConfig, sandbox_raw, "sandbox"),
         agent=_make(AgentConfig, agent_raw, "agent"),
+        sbx=_make(SbxConfig, sbx_raw, "sbx"),
         strict_vm=_make(StrictVMConfig, strict_vm_raw, "strict_vm"),
         mediator=_make(MediatorConfig, mediator_raw, "mediator"),
         publication=_make(PublicationConfig, publication_raw, "publication"),
@@ -717,14 +764,16 @@ def _validate(config: AppConfig) -> None:
         and 1 <= config.sandbox.timeout_seconds <= 7_200
     ):
         raise ConfigError("sandbox resource limits are outside conservative bounds")
-    if config.agent.backend not in {"container", "host", "strict-vm"}:
-        raise ConfigError("agent.backend must be container, host, or strict-vm")
-    if config.agent.backend == "strict-vm":
+    if config.agent.backend not in {"container", "host", "strict-vm", "sbx"}:
+        raise ConfigError("agent.backend must be container, host, strict-vm, or sbx")
+    if config.agent.backend in {"strict-vm", "sbx"}:
         if config.agent.command:
-            raise ConfigError("strict-vm agents cannot accept a configurable command")
+            raise ConfigError(f"{config.agent.backend} agents cannot accept a configurable command")
         if config.agent.pass_environment:
-            raise ConfigError("strict-vm agents cannot inherit host environment variables")
-        if not config.strict_vm.enabled:
+            raise ConfigError(
+                f"{config.agent.backend} agents cannot inherit host environment variables"
+            )
+        if config.agent.backend == "strict-vm" and not config.strict_vm.enabled:
             raise ConfigError("agent.backend=strict-vm requires strict_vm.enabled=true")
     else:
         if not config.agent.command:
@@ -784,6 +833,94 @@ def _validate(config: AppConfig) -> None:
             "the coding agent may not receive GitHub or runtime-control credentials: "
             + ", ".join(sorted(exposed))
         )
+    sbx = config.sbx
+    if sbx.binary_path and not _safe_absolute_config_path(sbx.binary_path):
+        raise ConfigError("sbx.binary_path must be a canonical absolute path")
+    if sbx.binary_path and Path(sbx.binary_path).name != "sbx":
+        raise ConfigError("sbx.binary_path must name the sbx executable")
+    if sbx.binary_sha256 and _SHA256.fullmatch(sbx.binary_sha256) is None:
+        raise ConfigError("sbx.binary_sha256 must be lowercase SHA-256")
+    if sbx.version and re.fullmatch(r"v\d+\.\d+\.\d+", sbx.version) is None:
+        raise ConfigError("sbx.version must be an exact stable version")
+    if sbx.revision and re.fullmatch(r"[0-9a-f]{40}", sbx.revision) is None:
+        raise ConfigError("sbx.revision must be an exact lowercase Git revision")
+    if sbx.agent != "codex":
+        raise ConfigError("sbx.agent must be codex")
+    if not sbx.clone_mode_required:
+        raise ConfigError("sbx.clone_mode_required may not be disabled")
+    sbx_memory = _bounded_byte_size(sbx.memory, "sbx.memory", 512 << 20, 8 << 30)
+    if (
+        not 1 <= sbx.cpus <= 4
+        or not 30 <= sbx.create_timeout_seconds <= 900
+        or not 60 <= sbx.stage_timeout_seconds <= 3_600
+        or not 30 <= sbx.cleanup_timeout_seconds <= 300
+        or not 1_024 <= sbx.max_output_bytes <= 1_000_000
+        or sbx_memory > 8 << 30
+    ):
+        raise ConfigError("sbx resource and output limits are outside conservative bounds")
+    if sbx.network_policy != "locked-down-openai-only":
+        raise ConfigError("sbx.network_policy must be locked-down-openai-only")
+    if sbx.reasoning_effort != "high":
+        raise ConfigError("sbx.reasoning_effort must be high")
+    if config.agent.backend == "sbx":
+        missing_sbx_identity = sorted(
+            name
+            for name, value in (
+                ("binary_path", sbx.binary_path),
+                ("binary_sha256", sbx.binary_sha256),
+                ("version", sbx.version),
+                ("revision", sbx.revision),
+            )
+            if not value
+        )
+        if missing_sbx_identity:
+            raise ConfigError(
+                "agent.backend=sbx requires pinned sbx identity: " + ", ".join(missing_sbx_identity)
+            )
+        if config.agent.provider != "openai-codex-cli" or config.agent.model != "gpt-5.6-terra":
+            raise ConfigError("sbx execution requires openai-codex-cli gpt-5.6-terra")
+        if (
+            sbx.binary_path,
+            sbx.binary_sha256,
+            sbx.version,
+            sbx.revision,
+            sbx.agent,
+            sbx.clone_mode_required,
+            sbx.cpus,
+            sbx.memory.lower(),
+            sbx.create_timeout_seconds,
+            sbx.stage_timeout_seconds,
+            sbx.cleanup_timeout_seconds,
+            sbx.max_output_bytes,
+            sbx.network_policy,
+            sbx.reasoning_effort,
+        ) != (
+            "/opt/homebrew/Caskroom/sbx/0.35.0/bin/sbx",
+            "b046dce135756ee14a72e88165c90b07d10e2d48b86cd089adee5acc2abf2d01",
+            "v0.35.0",
+            "01e01520456e4126a9653471e7072e4d9b280321",
+            "codex",
+            True,
+            2,
+            "4g",
+            300,
+            1_200,
+            120,
+            65_536,
+            "locked-down-openai-only",
+            "high",
+        ):
+            raise ConfigError("sbx execution requires the exact reviewed v0.35 resource profile")
+        if (
+            not config.agent.checkin_required
+            or not config.agent.usage_reporting_required
+            or config.agent.max_repair_cycles != 0
+            or config.agent.max_output_bytes != 65_536
+            or config.agent.estimated_tokens_p95 > 55_000
+        ):
+            raise ConfigError("sbx agent safeguards must match the exact economical run profile")
+        if config.strict_vm.enabled:
+            raise ConfigError("sbx execution cannot enable the archived strict_vm backend")
     strict = config.strict_vm
     if strict.profile != "darwin-vz-offline-v2":
         raise ConfigError("strict_vm.profile must be darwin-vz-offline-v2")
@@ -880,6 +1017,28 @@ def _validate(config: AppConfig) -> None:
         raise ConfigError("mediator limits are outside conservative bounds")
     if config.mediator.backend == "fixture" and config.agent.backend != "strict-vm":
         raise ConfigError("the fixture mediator is only valid with agent.backend=strict-vm")
+    if config.agent.backend == "sbx" and (
+        config.mediator.provider,
+        config.mediator.model,
+        config.mediator.reasoning_effort,
+        config.mediator.max_calls,
+        config.mediator.per_call_timeout_seconds,
+        config.mediator.max_prompt_bytes,
+        config.mediator.max_response_bytes,
+        config.mediator.total_token_cap,
+    ) != (
+        "openai-subscription",
+        "gpt-5.6-terra",
+        "high",
+        3,
+        1_200,
+        20_904,
+        65_536,
+        55_000,
+    ):
+        raise ConfigError(
+            "sbx mediator limits must match the exact three-stage Terra-high execution contract"
+        )
     if config.publication.mode not in {"dry-run", "draft-pr"}:
         raise ConfigError("publication.mode must be dry-run or draft-pr")
     if not config.publication.require_cli_flag:
@@ -889,10 +1048,12 @@ def _validate(config: AppConfig) -> None:
     if config.publication.mode == "draft-pr" and config.agent.backend not in {
         "container",
         "strict-vm",
+        "sbx",
     }:
-        raise ConfigError("draft publication requires a container or strict-vm agent backend")
+        raise ConfigError("draft publication requires a container, strict-vm, or sbx agent backend")
     if (
         config.publication.mode == "draft-pr"
+        and config.agent.backend == "container"
         and _PINNED_IMAGE.fullmatch(config.sandbox.image) is None
     ):
         raise ConfigError("draft publication requires sandbox.image pinned by SHA-256 digest")

@@ -42,8 +42,8 @@ The macOS preview job uses a smaller read-only scan and stores the resulting ran
 to run an agent or contact maintainers.
 
 For each nominee, re-open current upstream sources and explicitly record all of the following in the
-installed `config.toml` (or the normal repository configuration) before any future strict-VM
-execution. Curation is necessary evidence, but cannot authorize execution by itself:
+installed `config.toml` (or the normal repository configuration) before any future strict
+execution-boundary run. Curation is necessary evidence, but cannot authorize execution by itself:
 
 1. exact `owner/name`, reviewed SPDX allowlist, default branch, and contribution/CLA/DCO/security
    rules;

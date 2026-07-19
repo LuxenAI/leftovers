@@ -1181,6 +1181,7 @@ class MacOSPackageTests(unittest.TestCase):
             names = {member.name for member in archive.getmembers()}
             self.assertIn(f"{prefix}/PACKAGE-MANIFEST.json", names)
             self.assertIn(f"{prefix}/scripts/install-macos.sh", names)
+            self.assertIn(f"{prefix}/scripts/sbx-rehearsal.sh", names)
             self.assertIn(f"{prefix}/scripts/uninstall-macos.sh", names)
             self.assertIn(f"{prefix}/vm/strict_vm_launcher.swift", names)
             self.assertIn(f"{prefix}/vm/strict-vm.entitlements.plist", names)

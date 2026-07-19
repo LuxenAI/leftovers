@@ -21,6 +21,8 @@ review—not more unsolicited pull requests.
   controller-rendered draft-PR text from verified evidence.
 - Docker/Podman rehearsal command construction with no GitHub credential in the worker; the stock
   runner cannot attest production isolation and is rejected before quota or discovery.
+- A Docker Sandboxes (`sbx`) compatibility candidate with a separately invokable, no-agent shell
+  rehearsal. It is not a provider or Terra/high run, and its production backend is source-disabled.
 - Offline operator-curated verification commands plus structural rename/file-mode, dependency,
   license, secret, size, and forbidden-path gates.
 - A hash-chained redacted audit journal plus label-checked container cleanup that must complete before
@@ -37,10 +39,10 @@ review—not more unsolicited pull requests.
 - Daily/weekly scheduler templates and a container-first CI/test path.
 - A portable macOS **scout-only** bundle: it performs read-only repository nomination and a
   synthetic Seatbelt rehearsal, but has no reachable host/OCI contribution-execution path.
-- A compile-checked Virtualization.framework launcher proof with a fixed Linux hardware graph,
+- Archival, source-disabled Virtualization.framework research with a fixed Linux hardware graph,
   manifest-v2 separation between immutable boot artifacts and sealed per-run inputs, a preallocated
-  scratch disk, and zero NIC, socket, or host directory-share devices. It remains fail-closed until
-  a reviewed guest and result handoff exist.
+  scratch disk, and zero NIC, socket, or host directory-share devices. It remains fail-closed and is
+  not the active operator integration path.
 
 ## System boundary
 
@@ -104,8 +106,8 @@ This is **not** a contribution-execution or publishing installation. Its configu
 non-executable placeholder repository, external writes are disabled, the scout receives no
 Codex credential path, and a build-time gate stops after read-only scouting. Docker/Podman and the
 host adapter are rehearsal-only even if installed. The candidate report is
-`.leftovers/install/reports/repository-candidates.json`; manual curation does not bypass the VM
-gate. See
+`.leftovers/install/reports/repository-candidates.json`; manual curation does not bypass the strict
+execution-evidence gate. See
 [`docs/MACOS_PACKAGE.md`](docs/MACOS_PACKAGE.md) for its exact prerequisites, limits, cleanup, and
 strict-VM status.
 
@@ -114,6 +116,41 @@ Documents, or Downloads folders. `--launch-now` is available only from a checkou
 folders; the installer fails before mutation instead of asking for Full Disk Access. Check the
 result with `./scripts/status-macos.sh`; remove the manifest-bound package with
 `./scripts/uninstall-macos.sh`. Build a reproducible transfer archive with `make macos-package`.
+
+### Docker Sandboxes candidate: standalone shell rehearsal
+
+On a separately prepared normal-user account, the standalone command for tonight is:
+
+```sh
+./scripts/sbx-rehearsal.sh --execute
+```
+
+If Docker Sandboxes is not installed yet, bootstrap it first:
+
+```sh
+brew trust docker/tap
+brew install docker/tap/sbx
+```
+
+Then authenticate and harden policy/credentials before the rehearsal:
+
+```sh
+sbx login
+sbx policy init deny-all
+sbx policy allow network \
+  "api.openai.com:443,openai.com:443,chatgpt.com:443,www.chatgpt.com:443"
+sbx secret set -g openai --oauth
+```
+
+It resolves the checkout itself and runs independently of this chat or the Codex desktop app. It
+creates, probes, and removes one randomly controller-named clone-mode **shell** sandbox after
+read-only checks. It does not start Codex, call OpenAI, request `gpt-5.6-terra`/`high`, consume model
+quota, read GitHub, or publish. Prepare the exact global `openai` service secret and Locked Down
+policy first; the required `sbx policy allow network ...` command, current Keychain `-50` blocker,
+and economical resource/token safeguards are in
+[`docs/DOCKER_SANDBOXES.md`](docs/DOCKER_SANDBOXES.md). A successful result is rehearsal evidence
+only: name-based lifecycle checks are not sandbox-ownership attestation, and the production
+contribution path remains source-disabled.
 
 1. Copy and curate the example configuration:
 
@@ -247,7 +284,10 @@ access, keep its credential controller-only, and cap output to one active PR per
 
 - **OCI rehearsal profile:** Docker/Podman with the hardening flags in `runner.py`. It proves
   deterministic control-plane behavior but is not admitted for unattended repository execution.
-- **Strict-VM proof:** [`vm/README.md`](vm/README.md) documents a per-run, zero-NIC
+- **Docker Sandboxes candidate:** the `sbx` rehearsal can prove a narrow shell-only lifecycle for a
+  pinned CLI and finite policy canaries. It does not make a provider/Terra call, is not a complete
+  policy attestation, and cannot enable `leftovers run --execute`.
+- **Archival strict-VM proof:** [`vm/README.md`](vm/README.md) documents a per-run, zero-NIC
   Virtualization.framework launcher. The launcher, sealed request/result format, cleanup lease,
   one-epoch controller, rejection-only guest source, Codex output parser, and dedicated-broker
   protocol model have deterministic tests. The guest has not been built or booted, provider and
@@ -289,5 +329,6 @@ cannot enable production writes.
 ## Project state and license
 
 This is an initial operational scaffold. It defaults to dry-run, requires deliberate repository
-curation, and currently denies production issue execution until the strict VM path is integrated.
+curation, and currently denies production issue execution until the strict execution-evidence
+contract is integrated and live-attested; the current code keeps that path source-disabled.
 Licensed under Apache-2.0; see [`LICENSE`](LICENSE).

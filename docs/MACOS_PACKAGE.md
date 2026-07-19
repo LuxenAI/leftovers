@@ -9,6 +9,11 @@ It is not a “run arbitrary GitHub issues tonight” switch. It performs a read
 scan and a synthetic workflow rehearsal only. Host and OCI contribution execution are explicitly
 disabled; curation or a container runtime cannot bypass that gate.
 
+The separate Docker Sandboxes command, `./scripts/sbx-rehearsal.sh --execute`, is not part of this
+package job. It is an independently invoked shell-only compatibility rehearsal: it does not start
+Codex, make a provider/Terra call, consume this package's dormant envelope, or change the
+source-disabled contribution gate. See [`DOCKER_SANDBOXES.md`](DOCKER_SANDBOXES.md).
+
 ## Safe first installation
 
 From the root of a trusted Leftovers checkout, as the normal macOS user:
@@ -167,9 +172,9 @@ approval, plugins/tools, workspace network access, and shell-environment inherit
 bounded JSONL usage receipt.
 
 This is an adapter test fixture, not a production isolation boundary. Production rejects its host
-backend, and launchd receives neither `CODEX_HOME` nor `LEFTOVERS_CODEX_BIN`. For the strict VM
-design and its still-missing guest/model mediation, see [`vm/README.md`](../vm/README.md) and
-[`SECURITY.md`](../SECURITY.md).
+backend, and launchd receives neither `CODEX_HOME` nor `LEFTOVERS_CODEX_BIN`. For the archival
+strict-VM design and its still-missing guest/model mediation, see [`vm/README.md`](../vm/README.md)
+and [`SECURITY.md`](../SECURITY.md).
 
 ## Assurance and verification
 

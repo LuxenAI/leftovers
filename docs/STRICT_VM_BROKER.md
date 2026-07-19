@@ -159,6 +159,39 @@ legitimate controller from a malicious process running under the same approved c
 Production therefore also needs an unforgeable mediator/broker capability or a code-signature-bound
 IPC design; caller-constructed hashes are not authorization.
 
+`leftovers.strict_vm_broker_storage` supplies a separate, **source-disabled** two-slot
+`BrokerJournalSink` backend for fixture rehearsal only. Its constructor accepts and duplicates a
+pre-opened broker-private `0700` root descriptor; no controller or public API can provide a path.
+The fixed `journal.slot0`/`journal.slot1` names are read with `O_NOFOLLOW` and bounded nonblocking
+descriptor reads. Each `0600`, single-link local regular file holds a fixed binary header plus raw
+length-prefixed canonical records, capped by the journal's 128-record/4-MiB limits. Writes create a
+fixed `O_EXCL` temp name, fully write and fsync it, atomically rename it within the retained root,
+then fsync the root. Before acknowledging, it keeps the fsynced temp descriptor across rename,
+proves the temp name absent, opens the fixed destination no-follow, and requires that descriptor to
+be the same device/inode/metadata and bounded, fully decoded slot content before and after root
+fsync. Destination replacement, temp reappearance, or any post-rename open/read/revalidation/close
+failure is ambiguous. Local descriptor variables are poisoned before `close(2)`, preventing an
+ambiguous close from causing a double-close of a reassigned FD. Root/file identity is rechecked
+around operations and retained descriptors are `FD_CLOEXEC`. If constructor setup fails after
+duplicating the root FD, it poisons the local reference and closes exactly once; an ambiguous cleanup
+close is explicit rather than leaked or retried. Slot reads likewise poison and close their local FD
+exactly once before publishing the result; a close error converts an otherwise valid slot into the
+non-`None` unreadable sentinel. A malformed, truncated, nonregular, hard-linked, oversize, or
+read-failed present slot receives the same sentinel—not an absent slot—so initialization cannot
+overwrite corruption. After temp creation every
+write/fsync/rename/root-fsync error is deliberately ambiguous: the journal must not acknowledge and
+must restart recovery. Pre-existing temps are rejected before any write. An explicit fixture restart
+method can remove only either fixed temp name after a
+descriptor-relative, no-follow check proves a broker-owned `0600`, single-link, bounded regular file.
+It holds that descriptor across the exact unlink, requires its link count to become zero, proves the
+name absent, revalidates/fsyncs the retained root, and proves absence again. A symlink, hard link,
+FIFO, directory, wrong owner/mode, oversize file, reappearance, identity change, or unlink/fsync error
+fails closed; once unlink is attempted, any failure is reported as ambiguous and requires another
+fresh recovery pass. A retained-root close error poisons the object's descriptor reference before it
+is reported, because `close(2)` errors cannot safely authorize FD reuse. This is not a live service,
+an external rollback anchor, ACL proof, or a guarantee against a hostile same-UID storage
+administrator.
+
 ## macOS installation and XPC peer contract
 
 `leftovers.strict_vm_broker_installation` is a separate, source-disabled pure contract for the
@@ -205,6 +238,27 @@ socket, or keepalive ambiguity. A future macOS implementation still needs a sepa
 root-owned installation procedure, XPC/audit-token adapter, code-signature API integration,
 descriptor-stable install verification, and live same-UID adversarial evidence. No pure contract
 can establish those runtime facts or make the VM absolutely escape-proof.
+
+`vm/broker/NativeBrokerTrustAdapter.swift` now compile-checks the proposed native adapter surface
+against the local Apple SDK, while its only executable path returns `EX_CONFIG` before touching a
+manifest, account, Security.framework, or XPC peer. Its inactive code retains no-follow manifest
+and ancestor descriptors across the read. The real macOS system ancestors through
+`/private/var/db` must be stable, local, root-owned, ACL-free, and not group/other writable; only
+the fixed `leftovers/strict-vm` install subtree must additionally have no write bits and an
+immutable flag. It validates the broker self and an XPC-message-audit-token-derived peer through
+`SecCodeCreateWithXPCMessage`, requires a nonempty observed CDHash set wholly contained in the
+manifest's rotation allowlist, and compares exact requirement bytes, Team/signing IDs, and the
+complete entitlement key/value map. A C compile-time probe pins the numeric Security flags used by
+Swift to the SDK declarations. It does **not** install a LaunchDaemon or bind the fixed Mach service.
+The public
+SDK lacks a declared `xpc_connection_get_audit_token` or debug-status constant here; the adapter
+uses the declared message-to-SecCode API, rejects debugger entitlement presence, and leaves direct
+connection-token/debug-state proof as an activation blocker rather than using a PID/path fallback.
+Descriptor owners poison their stored integer before `close(2)`, acquisition attempts every
+retained directory close exactly once and propagates any failure, and the manifest is closed through
+an explicit throwing scope before the adapter's unsupported return. Swift `deinit` cannot throw, so
+one documented best-effort poison-before-close fallback remains only for abandoned owner objects.
+ACL iteration accepts only an exact zero-entry result; a present entry or iterator error fails closed.
 
 Descriptor retention narrows pathname races but cannot remove the final same-UID name-removal race
 inside this fixture. The future distinct-UID/exclusive-root service boundary is mandatory, and even

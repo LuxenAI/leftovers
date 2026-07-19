@@ -89,10 +89,29 @@ estimated_tokens_p95 = 80000
 max_repair_cycles = 1
 pass_environment = []
 
+[sbx]
+# Docker Sandboxes is the active production-integration direction. These pins match sbx v0.35.0
+# as inspected on 2026-07-18; re-hash and review the CLI contract before any upgrade. The current
+# release consumes only this identity and cleanup_timeout_seconds in the non-production probe. The
+# other values are typed future staging intent, not runtime evidence or an execution switch.
+binary_path = "/opt/homebrew/Caskroom/sbx/0.35.0/bin/sbx"
+binary_sha256 = "b046dce135756ee14a72e88165c90b07d10e2d48b86cd089adee5acc2abf2d01"
+version = "v0.35.0"
+revision = "01e01520456e4126a9653471e7072e4d9b280321"
+agent = "codex"
+clone_mode_required = true
+cpus = 2
+memory = "4g"
+create_timeout_seconds = 300
+stage_timeout_seconds = 1200
+cleanup_timeout_seconds = 120
+max_output_bytes = 65536
+network_policy = "locked-down-openai-only"
+reasoning_effort = "high"
+
 [strict_vm]
-# This is a typed staging contract, not an execution switch. Production remains hard-disabled until
-# a reviewed v2 launcher, immutable guest, result extractor, and inference-only mediator pass live
-# adversarial tests together. Enabling it requires absolute artifact paths and lowercase SHA-256s.
+# Archived source-disabled research retained for migration review. The active integration direction
+# is [sbx]; do not enable this section alongside agent.backend = "sbx".
 # `guest_policy_path` is a canonical immutable `guest-policy.json` generated beside the signed boot
 # artifacts. Its digest is derived by the controller after verifying that its boot digests match;
 # no policy digest may be supplied in TOML.
@@ -115,11 +134,11 @@ backend = "disabled"
 provider = "openai-subscription"
 model = "gpt-5.6-terra"
 reasoning_effort = "high"
-max_calls = 12
-per_call_timeout_seconds = 360
-max_prompt_bytes = 262144
+max_calls = 3
+per_call_timeout_seconds = 1200
+max_prompt_bytes = 20904
 max_response_bytes = 65536
-total_token_cap = 65000
+total_token_cap = 55000
 
 [publication]
 mode = "dry-run"

@@ -18,6 +18,10 @@ and partial publication or cleanup failures.
   overrides), and the stock Docker/Podman runner.
 - OCI rehearsal flags drop capabilities and network, use a read-only root, no-new-privileges,
   validated CPU/RAM/PID/file/tmpfs limits, and a read-only `.git` overlay.
+- The active Docker Sandboxes candidate has a no-agent shell rehearsal only. It starts no Codex or
+  provider request, requires the global secret inventory to be exactly `(global) service openai`,
+  and fails closed on extra/missing global or scoped secret authority. Its fixed network canaries are
+  explicitly not a complete policy/proxy attestation.
 - Planning/review workspaces are read-only.
 - All configured commands are argv arrays and use `shell=False`.
 - Hard issue gates block security/legal/credential/design/collision work.
@@ -88,6 +92,16 @@ Do not describe these as solved:
   launcher, one-epoch controller, typed request/result parser, cleanup lease, and guest source
   scaffold exist, but every execution/mediator/broker/orchestrator gate remains source-disabled.
   The guest is rejection-only, unbuilt, and unbooted; no production issue execution is authorized.
+- Docker Sandboxes is the active integration candidate, not a production backend. Its installed
+  boundary is source-disabled, and the current compatibility probe creates only a disposable shell
+  sandbox. A passing finite allow/deny canary matrix cannot prove the effective policy has no other
+  egress, port, proxy, credential, daemon, or clone-bridge path. The local installed CLI is also
+  blocked before this probe's state inspection by Keychain error `-50`; no sandbox has been created
+  from that installation.
+- The rehearsal executes a user-installed CLI pathname after separate digest checks and tears down
+  by a random controller-derived name. Neither operation is an immutable executable attestation or
+  an unforgeable sandbox-ownership receipt. A same-session process-group cleanup also cannot prove
+  that a descendant which created a new session is gone. These remain production blockers.
 - The current orchestrator still clones and inspects a host-visible checkout. A complete strict
   runner must move acquisition, Git parsing, model/tool execution, verification, and diff creation
   into guest-owned disks and return only a bounded canonical bundle after shutdown.
@@ -129,12 +143,13 @@ Do not describe these as solved:
 
 ## High-assurance deployment requirements
 
-Before enabling production, complete the guest and controller integration described in
-[`vm/README.md`](vm/README.md): reproducible signed boot artifacts, non-root cgroup/seccomp/Landlock
-guest policy, in-guest acquisition and verification, no-general-egress model mediation, bounded
-post-stop result extraction, adversarial escape/resource tests, and cleanup receipts. Keep the
-publisher outside the guest with a just-in-time token. Never expose a host runtime socket or run an
-untrusted repository Dockerfile against it.
+Before enabling production, complete and independently review the strict evidence contract:
+credential-isolated model mediation, constrained acquisition and verification, an attested complete
+network/filesystem/clone boundary, bounded post-stop result extraction, adversarial escape/resource
+tests, token/crash evidence, and cleanup receipts. The existing strict-VM material in
+[`vm/README.md`](vm/README.md) is archival source-disabled research and is not an activation shortcut.
+Keep the publisher outside the worker boundary with a just-in-time token. Never expose a host runtime
+socket or run an untrusted repository Dockerfile against it.
 
 Those controls can reduce attack surface and bound damage; they cannot prove that macOS,
 Virtualization.framework, the CPU, or the guest kernel contains no exploitable escape. Do not

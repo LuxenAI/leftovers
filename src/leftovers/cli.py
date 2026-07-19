@@ -32,6 +32,8 @@ from .rehearsal import (
     seatbelt_argv,
 )
 from .runner import AgentRunner, RunnerCleanupError, RunnerError
+from .sbx import SbxIdentity
+from .sbx_rehearsal import SbxCompatibilityProbe, SbxRehearsalError
 from .statefs import PrivateStateError, private_directory
 from .telemetry import TelemetryError, TelemetryReader
 from .workspace import WorkspaceError, reap_expired
@@ -82,6 +84,25 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="validate configuration and exit")
     subparsers.add_parser("doctor", help="check local runtime prerequisites without remote writes")
+
+    sbx_rehearsal = subparsers.add_parser(
+        "sbx-rehearsal",
+        help="verify the pinned Docker Sandboxes boundary without starting an AI agent",
+    )
+    sbx_rehearsal.add_argument(
+        "--execute",
+        action="store_true",
+        help="create and remove one controller-owned shell sandbox after read-only checks",
+    )
+    sbx_rehearsal.add_argument(
+        "--private-temp-root",
+        type=Path,
+        help="owner-private root for the disposable tracked-only fixture",
+    )
+    sbx_rehearsal.add_argument(
+        "--run-id",
+        help="controller-owned 32-character hexadecimal rehearsal identity",
+    )
 
     scout = subparsers.add_parser("scout", help="discover, gate, score, and rank issues read-only")
     scout.add_argument("--fixture", type=Path, help="read issues from a local JSON fixture")
@@ -258,11 +279,20 @@ def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
         runtime_present,
         f"{config.sandbox.runtime} is required only for OCI rehearsal and verification stages",
     )
+    sbx_config = getattr(config, "sbx", None)
+    sbx_binary = getattr(sbx_config, "binary_path", "")
+    sbx_present = bool(sbx_binary) and Path(sbx_binary).is_file()
     add(
-        "strict_vm_execution",
+        "sbx_runtime",
+        sbx_present,
+        "the exact configured Docker Sandboxes binary is required for the compatibility probe",
+        severity="warning" if config.agent.backend != "sbx" else "error",
+    )
+    add(
+        "sbx_execution",
         False,
-        "production execution is disabled until the no-NIC per-run VM runner and guest "
-        "artifact handoff are integrated and live-attested",
+        "production execution is disabled until clone mode, policy, credential isolation, "
+        "bounded result extraction, and exact cleanup are live-attested together",
     )
     add(
         "pinned_image",
@@ -272,14 +302,16 @@ def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
     )
     add(
         "agent_backend",
-        config.agent.backend == "container",
-        "host agents are rehearsal-only and are rejected by unattended production admission",
+        config.agent.backend == "sbx",
+        "unattended production requires the source-gated sbx backend; "
+        "host/OCI remain rehearsal-only",
         severity="warning",
     )
     add(
-        "rootless_runtime",
+        "sandbox_policy_boundary",
         False,
-        "rootless/runtime-VM isolation is operator-provided and not portably auto-verified",
+        "effective sbx network, secret, port, clone, and cleanup policy "
+        "needs an explicit rehearsal",
         severity="warning",
     )
     add(
@@ -486,6 +518,58 @@ def main(argv: list[str] | None = None) -> int:
             ok, checks = _doctor(config)
             print(json.dumps({"ok": ok, "checks": checks}, indent=2))
             return 0 if ok else 2
+        if args.command == "sbx-rehearsal":
+            if getattr(os, "geteuid", lambda: 1)() == 0:
+                raise SbxRehearsalError("Docker Sandboxes rehearsal must not run as root")
+            if args.run_id is not None and _RUN_ID.fullmatch(args.run_id) is None:
+                raise ConfigError("--run-id must be exactly 32 lowercase hexadecimal characters")
+            try:
+                identity = SbxIdentity(
+                    Path(config.sbx.binary_path),
+                    config.sbx.version,
+                    config.sbx.revision,
+                    config.sbx.binary_sha256,
+                )
+            except ValueError as exc:
+                raise ConfigError("[sbx] does not contain a valid pinned CLI identity") from exc
+            private_root = private_directory(
+                args.private_temp_root
+                if args.private_temp_root is not None
+                else config.temp_root / "sbx-rehearsal"
+            )
+            receipt = SbxCompatibilityProbe(
+                expected_identity=identity,
+                ambient=os.environ,
+                timeout_seconds=min(config.sbx.cleanup_timeout_seconds, 120),
+            ).rehearse(
+                private_temp_root=private_root,
+                run_nonce=args.run_id or uuid.uuid4().hex,
+                execute=args.execute,
+            )
+            print(
+                json.dumps(
+                    {
+                        "state": receipt.state,
+                        "production_execution_authorized": False,
+                        "ai_agent_started": False,
+                        "sandbox_name": receipt.name,
+                        "fixture_path": str(receipt.fixture_path) if receipt.fixture_path else None,
+                        "final_absent": receipt.final_absent,
+                        "sbx": {
+                            "binary": str(receipt.doctor.identity.binary),
+                            "version": receipt.doctor.identity.version,
+                            "revision": receipt.doctor.identity.revision,
+                            "sha256": receipt.doctor.identity.sha256,
+                        },
+                        "preexisting_sandbox_count": len(receipt.doctor.sandbox_names),
+                        "openai_secret_configured": receipt.doctor.openai_secret_configured,
+                        "github_secret_configured": receipt.doctor.github_secret_configured,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
         if args.command == "cleanup":
             runner = AgentRunner(config.sandbox, config.agent)
             if not runner.runtime_available():
@@ -625,6 +709,7 @@ def main(argv: list[str] | None = None) -> int:
         GitHubError,
         PrivateStateError,
         RehearsalError,
+        SbxRehearsalError,
         RunnerError,
         TelemetryError,
         WorkspaceError,

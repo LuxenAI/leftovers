@@ -104,6 +104,26 @@ estimated_tokens_p95 = 50000
 max_repair_cycles = 0
 pass_environment = []
 
+[sbx]
+# Exact Docker Sandboxes v0.35.0 identity for the separately invoked compatibility probe. The
+# installed nightly package remains scout-only until that probe and the full controller integration
+# are live-verified; only this identity and cleanup_timeout_seconds feed the current probe. The other
+# values are future staging intent, and this table cannot enable execution.
+binary_path = "/opt/homebrew/Caskroom/sbx/0.35.0/bin/sbx"
+binary_sha256 = "b046dce135756ee14a72e88165c90b07d10e2d48b86cd089adee5acc2abf2d01"
+version = "v0.35.0"
+revision = "01e01520456e4126a9653471e7072e4d9b280321"
+agent = "codex"
+clone_mode_required = true
+cpus = 2
+memory = "4g"
+create_timeout_seconds = 300
+stage_timeout_seconds = 1200
+cleanup_timeout_seconds = 120
+max_output_bytes = 65536
+network_policy = "locked-down-openai-only"
+reasoning_effort = "high"
+
 [publication]
 mode = "dry-run"
 external_writes_acknowledged = false

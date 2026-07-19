@@ -134,6 +134,18 @@ class StrictVMSyntheticRehearsalTests(unittest.TestCase):
         ):
             synthetic._require_all_production_authorities_disabled()
 
+    def test_new_storage_and_capsule_gates_are_part_of_the_no_authority_rehearsal(self) -> None:
+        for gate in (
+            "STRICT_VM_BROKER_JOURNAL_STORAGE_ENABLED",
+            "STRICT_VM_SOURCE_CAPSULE_PACKING_ENABLED",
+        ):
+            with (
+                self.subTest(gate=gate),
+                mock.patch.object(synthetic, gate, True),
+                self.assertRaisesRegex(SyntheticRehearsalError, "authority gate"),
+            ):
+                synthetic._require_all_production_authorities_disabled()
+
     def test_public_broker_entry_rejects_before_any_dependency_is_inspected(self) -> None:
         with self.assertRaisesRegex(BrokerUnavailableError, "source-disabled"):
             StrictVMBrokerServiceCore(

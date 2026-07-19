@@ -104,10 +104,12 @@ roll back the entire state root and recompute an unkeyed chain. Production must 
 its durable anchor under the dedicated broker/service account; the local implementation is only a
 bounded recovery and accounting contract.
 
-The mediator/controller must not write a request, manifest, or scratch path that the strict-VM
-launcher later opens. That same-UID race is reserved for a separately installed dedicated service
-account described in [`STRICT_VM_BROKER.md`](STRICT_VM_BROKER.md). The broker protocol is also
-hard-disabled and does not provide a path, argv, socket listener, or launcher invocation today.
+The mediator/controller must not write a request, manifest, or scratch path that a future strict
+execution boundary later opens. The active sbx candidate does not solve that same-UID race; it still
+needs a separately installed authority that binds source, policy, credentials, execution, and
+result extraction. The reference dedicated-service contract is described in
+[`STRICT_VM_BROKER.md`](STRICT_VM_BROKER.md), but remains hard-disabled and provides no launcher
+invocation today.
 
 ## Activation evidence required
 
@@ -121,15 +123,19 @@ review supplies all of the following:
    cwd, an empty inherited shell environment, explicit feature disables, a controller-owned output
    schema/result path, and stdin-only prompting; none of those flags is treated as sufficient proof.
 2. A credential broker that can authenticate the CLI without exposing user config, keychain access,
-   a token, or a socket to the strict-VM guest or repository code.
+   a token, or a socket to the sandbox guest or repository code.
 3. Live tests proving private cwd/environment, capability absence, output/event limits, monotonic
    timeout, complete process-group cleanup, exact usage parsing, crash-reservation recovery, and
    no secrets in receipts.
-4. A reviewed whole-cycle strict-VM integration with no remote writes, followed by adversarial
-   escape/resource/cleanup evidence.
+4. A reviewed whole-cycle strict execution integration with no remote writes, followed by
+   adversarial escape/resource/cleanup evidence.
 
-Until then the supported terminal command remains the scout-only command documented in the README:
+Until then, model-capable contribution work has no supported terminal command. The supported
+installed workflow remains the scout-only command documented in the README:
 
 ```sh
 ./scripts/install-macos.sh --force-config --scout
 ```
+
+`./scripts/sbx-rehearsal.sh --execute` is a separate, independently runnable shell-only
+compatibility rehearsal. It does not invoke this mediator, Codex, a provider, or Terra/high.

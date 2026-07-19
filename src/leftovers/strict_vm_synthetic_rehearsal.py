@@ -52,6 +52,7 @@ from .strict_vm_broker_service import (
     FixturePrivateRunRoot,
     issue_fixture_broker_service_capability,
 )
+from .strict_vm_broker_storage import STRICT_VM_BROKER_JOURNAL_STORAGE_ENABLED
 from .strict_vm_cycle import (
     STRICT_VM_WHOLE_CYCLE_CAPABILITY,
     CyclePlan,
@@ -73,6 +74,7 @@ from .strict_vm_poststop import (
     read_nofollow_artifact,
 )
 from .strict_vm_runner import STRICT_VM_EXECUTION_ENABLED
+from .strict_vm_source_capsule import STRICT_VM_SOURCE_CAPSULE_PACKING_ENABLED
 
 SYNTHETIC_REHEARSAL_ONLY = True
 """This module intentionally has no switch that permits a live execution."""
@@ -536,6 +538,7 @@ def _require_all_production_authorities_disabled() -> None:
         PRODUCTION_MEDIATION_ENABLED,
         STRICT_VM_BROKER_ENABLED,
         STRICT_VM_BROKER_DESCRIPTOR_ADMISSION_ENABLED,
+        STRICT_VM_BROKER_JOURNAL_STORAGE_ENABLED,
         STRICT_VM_BROKER_SERVICE_ENABLED,
         STRICT_VM_BROKER_DEDICATED_UID_EVIDENCE_VERIFIED,
         STRICT_VM_BROKER_CODE_SIGNATURE_EVIDENCE_VERIFIED,
@@ -545,6 +548,7 @@ def _require_all_production_authorities_disabled() -> None:
         STRICT_VM_EXECUTION_ENABLED,
         STRICT_VM_OS_EXECUTOR_ENABLED,
         STRICT_VM_POSTSTOP_ENABLED,
+        STRICT_VM_SOURCE_CAPSULE_PACKING_ENABLED,
         STRICT_VM_WHOLE_CYCLE_CAPABILITY,
     )
     if any(gates):

@@ -40,9 +40,25 @@ All files are opened with `O_NOFOLLOW`; file-descriptor identity is compared bef
 
 `SIGTERM`, `SIGINT`, and `SIGHUP` request a destructive Virtualization.framework stop. The launcher
 allows at most ten additional seconds to prove that stop. A missing or failed stop proof produces
-`stop_unproven`, never success. A run that actually started retains the scratch disk for a separate
-verifier; check mode and failed starts remove it. The caller must treat an absent receipt, a
-`scratch_retained` result it cannot verify, or a forced `SIGKILL` as `cleanup_pending`.
+`stop_unproven`, never success. Because `VZVirtualMachine.start` is asynchronous, a stop deadline
+before the start completion is treated as an unresolved start attempt: scratch is retained rather
+than unlinked. Scratch is revalidated and fsynced only after the framework reports a confirmed stop.
+A start attempt is eligible for scratch deletion only when its completion was observed, it failed,
+and Virtualization.framework is definitely stopped; every other start outcome retains scratch for a
+separate verifier. The launcher closes all inherited file descriptors above stderr across the
+Darwin-reported live descriptor list before lowering its own FD limit; this also closes an FD a
+parent opened at a higher soft limit and then inherited after lowering that limit. The list must be
+nonempty, structurally valid, ABI-compatible, and contain exactly one entry each for standard output
+and standard error; otherwise setup fails before manifest access. Darwin exposes no public atomic
+close-all primitive, so this remains an enumerate-then-close operation and must stay before launcher
+dispatch or VM setup. Successful manifest, artifact-hash, revalidation, scratch, and directory-sync
+paths also require their owned descriptors to close successfully; after a close attempt the launcher
+never retries that descriptor number, because a failed close can leave its kernel ownership
+ambiguous. A failed earlier operation remains fail-closed even if its best-effort descriptor cleanup
+cannot be proved before process exit. It bounds each JSON receipt to 16 KiB and hashes artifacts in 1 MiB
+autorelease-pooled chunks. The caller must treat an absent receipt, a
+`scratch_retained` result it cannot verify, `stop_unproven`, or a forced `SIGKILL` as
+`cleanup_pending`.
 
 ## Manifest v2
 

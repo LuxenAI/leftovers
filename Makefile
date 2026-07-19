@@ -5,14 +5,24 @@ SANDBOX_IMAGE ?= leftovers-sandbox:latest
 REHEARSAL_IMAGE ?= leftovers-rehearsal:local
 REHEARSAL_REPORT ?= .leftovers/rehearsal-report.json
 
-.PHONY: dashboard demo guest-lock-check guest-release-preflight macos-package package-smoke \
-	rehearsal-image sandbox-image strict-vm-check test test-local training-run training-run-process validate
+.PHONY: dashboard demo guest-lock-check guest-release-preflight macos-package native-broker-check package-smoke \
+	rehearsal-image sandbox-image sbx-doctor sbx-rehearsal strict-vm-check test test-local training-run \
+	training-run-process validate
 
 macos-package:
 	python3 scripts/build_macos_package.py
 
 strict-vm-check:
 	sh vm/check.sh
+
+native-broker-check:
+	sh vm/broker/check.sh
+
+sbx-doctor:
+	./scripts/sbx-rehearsal.sh
+
+sbx-rehearsal:
+	./scripts/sbx-rehearsal.sh --execute
 
 guest-lock-check:
 	sh vm/guest/check-static.sh

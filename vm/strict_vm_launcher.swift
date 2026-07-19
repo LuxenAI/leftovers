@@ -11,6 +11,8 @@ private let gib: UInt64 = 1_073_741_824
 private let hostFreeSpaceReserve = gib
 private let maximumHostFileDescriptors: rlim_t = 256
 private let maximumScratchPreparationSeconds = 60.0
+private let maximumReceiptBytes = 16 * 1024
+private let maximumDescriptorSnapshotBytes: Int32 = 1_048_576
 private let productionCPUCount = 2
 private let productionMemoryBytes = 2 * gib
 private let productionScratchBytes = 2 * gib
@@ -301,6 +303,12 @@ private struct StopOutcome {
     let reason: String
     let startedAt: String?
     let errorCode: String?
+    // `VZVirtualMachine.start` is asynchronous.  A timeout before its completion is not
+    // evidence that it did not acquire the scratch attachment, so cleanup must retain it.
+    let startAttempted: Bool
+    let startCompletionObserved: Bool
+    let startSucceeded: Bool
+    let stopConfirmed: Bool
 }
 
 private final class SignalCancellation {
@@ -389,6 +397,173 @@ private func applyHostProcessLimits() throws {
     }
 }
 
+// Darwin has neither a public closefrom(3) nor close_range(2).  proc_pidinfo's
+// PROC_PIDLISTFDS view is not constrained by the caller's current soft RLIMIT_NOFILE,
+// unlike getdtablesize().  It therefore still reports a descriptor which a parent opened at a
+// higher limit and lowered before exec.
+private let procPIDListFDs: Int32 = 1
+private let procFDInfoRecordBytes = 8
+
+private struct ProcessFileDescriptor {
+    let descriptor: Int32
+    let type: UInt32
+}
+
+@_silgen_name("proc_pidinfo")
+private func procPIDInfo(
+    _ pid: Int32,
+    _ flavor: Int32,
+    _ arg: UInt64,
+    _ buffer: UnsafeMutableRawPointer?,
+    _ bufferSize: Int32
+) -> Int32
+
+#if LEFTOVERS_TESTING
+private func procPIDInfoTestFault() -> String? {
+    guard let value = getenv("LEFTOVERS_TEST_PROC_PIDINFO_FAULT") else { return nil }
+    return String(cString: value)
+}
+#endif
+
+private func procPIDInfoSnapshot(
+    _ buffer: UnsafeMutableRawPointer?,
+    _ bufferSize: Int32,
+    invocation: Int
+) -> Int32 {
+#if LEFTOVERS_TESTING
+    switch (procPIDInfoTestFault(), invocation) {
+    case ("zero_first", 1), ("zero_second", 2):
+        errno = EIO
+        return 0
+    case ("malformed_first", 1), ("malformed_second", 2):
+        return 7
+    default:
+        break
+    }
+#endif
+    return procPIDInfo(getpid(), procPIDListFDs, 0, buffer, bufferSize)
+}
+
+private func inheritedProcessFileDescriptors() throws -> [ProcessFileDescriptor] {
+    let recordSize = MemoryLayout<ProcessFileDescriptor>.stride
+    guard MemoryLayout<ProcessFileDescriptor>.size == procFDInfoRecordBytes,
+          recordSize == procFDInfoRecordBytes,
+          MemoryLayout<ProcessFileDescriptor>.alignment == MemoryLayout<Int32>.alignment else {
+        throw LaunchFailure(
+            code: "host_descriptor_abi",
+            detail: "proc_fdinfo ABI no longer matches the launcher record"
+        )
+    }
+    errno = 0
+    let snapshotBytes = procPIDInfoSnapshot(nil, 0, invocation: 1)
+    let snapshotErrno = errno
+    guard snapshotBytes > 0,
+          snapshotErrno == 0,
+          snapshotBytes % Int32(recordSize) == 0,
+          snapshotBytes <= maximumDescriptorSnapshotBytes else {
+        throw LaunchFailure(
+            code: "host_descriptor_snapshot",
+            detail: "cannot bound the inherited descriptor snapshot"
+        )
+    }
+
+    var descriptors = Array(
+        repeating: ProcessFileDescriptor(descriptor: -1, type: 0),
+        count: Int(snapshotBytes) / recordSize
+    )
+    errno = 0
+    let listedBytes = descriptors.withUnsafeMutableBytes { buffer in
+        procPIDInfoSnapshot(buffer.baseAddress, Int32(buffer.count), invocation: 2)
+    }
+    let listedErrno = errno
+    guard listedBytes > 0,
+          listedErrno == 0,
+          listedBytes % Int32(recordSize) == 0,
+          listedBytes <= snapshotBytes else {
+        throw LaunchFailure(
+            code: "host_descriptor_snapshot",
+            detail: "cannot read the inherited descriptor snapshot"
+        )
+    }
+    descriptors = Array(descriptors.prefix(Int(listedBytes) / recordSize))
+#if LEFTOVERS_TESTING
+    switch procPIDInfoTestFault() {
+    case "negative_record" where !descriptors.isEmpty:
+        descriptors[0] = ProcessFileDescriptor(descriptor: -1, type: 0)
+    case "duplicate_record" where descriptors.count >= 2:
+        descriptors[1] = descriptors[0]
+    case "negative_record", "duplicate_record":
+        throw LaunchFailure(
+            code: "host_descriptor_snapshot",
+            detail: "cannot inject a malformed inherited descriptor snapshot"
+        )
+    default:
+        break
+    }
+#endif
+    var seen = Set<Int32>()
+    var hasStandardOutput = false
+    var hasStandardError = false
+    for entry in descriptors {
+        guard entry.descriptor >= 0, seen.insert(entry.descriptor).inserted else {
+            throw LaunchFailure(
+                code: "host_descriptor_snapshot",
+                detail: "inherited descriptor snapshot contains an invalid record"
+            )
+        }
+        hasStandardOutput = hasStandardOutput || entry.descriptor == STDOUT_FILENO
+        hasStandardError = hasStandardError || entry.descriptor == STDERR_FILENO
+    }
+    guard hasStandardOutput, hasStandardError else {
+        throw LaunchFailure(
+            code: "host_descriptor_snapshot",
+            detail: "inherited descriptor snapshot lacks standard receipt channels"
+        )
+    }
+    return descriptors
+}
+
+private func closeInheritedFileDescriptors() throws {
+    // The launcher has no valid use for caller-supplied descriptors beyond stdio.  Close them
+    // before Dispatch or Virtualization.framework can create any run-owned descriptors.
+    for entry in try inheritedProcessFileDescriptors() where entry.descriptor >= 3 {
+        if close(entry.descriptor) != 0, errno != EBADF {
+            throw LaunchFailure(
+                code: "host_descriptor_cleanup",
+                detail: "cannot close an inherited file descriptor"
+            )
+        }
+    }
+}
+
+private func closeDescriptor(_ descriptor: Int32, code: String, detail: String) throws {
+#if LEFTOVERS_TESTING
+    if ProcessInfo.processInfo.environment["LEFTOVERS_TEST_CLOSE_DESCRIPTOR_FAILURE"] == code {
+        errno = EIO
+        throw LaunchFailure(code: code, detail: detail)
+    }
+#endif
+    guard close(descriptor) == 0 else {
+        throw LaunchFailure(code: code, detail: detail)
+    }
+}
+
+#if LEFTOVERS_TESTING
+private func verifyTestDescriptorClosed() throws {
+    guard let rawDescriptor = ProcessInfo.processInfo.environment[
+        "LEFTOVERS_TEST_EXPECT_CLOSED_FD"
+    ], let descriptor = Int32(rawDescriptor), descriptor >= 3 else {
+        return
+    }
+    guard fcntl(descriptor, F_GETFD) == -1, errno == EBADF else {
+        throw LaunchFailure(
+            code: "host_descriptor_retained",
+            detail: "inherited test descriptor survived early launcher setup"
+        )
+    }
+}
+#endif
+
 private func timestamp() -> String {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -398,7 +573,33 @@ private func timestamp() -> String {
 private func emit(_ receipt: Receipt) {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-    guard let data = try? encoder.encode(receipt) else {
+    guard let data = try? encoder.encode(receipt), data.count <= maximumReceiptBytes else {
+        let fallback = Receipt(
+            schemaVersion: receiptSchemaVersion,
+            launcherVersion: launcherVersion,
+            manifestSHA256: nil,
+            runID: nil,
+            mode: "unknown",
+            status: "failed",
+            startedAt: nil,
+            finishedAt: timestamp(),
+            configValidated: false,
+            stopReason: nil,
+            limits: nil,
+            artifacts: nil,
+            devices: nil,
+            scratchRetained: false,
+            errorCode: "receipt_oversize"
+        )
+        guard let fallbackData = try? encoder.encode(fallback), fallbackData.count <= maximumReceiptBytes else {
+            FileHandle.standardError.write(Data("receipt_encoding_failed\n".utf8))
+            return
+        }
+        FileHandle.standardOutput.write(fallbackData)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+        return
+    }
+    if data.isEmpty {
         FileHandle.standardError.write(Data("receipt_encoding_failed\n".utf8))
         return
     }
@@ -585,8 +786,13 @@ private func loadManifest(path: String) throws -> LoadedManifest {
     guard descriptor >= 0 else {
         throw LaunchFailure(code: "manifest_open", detail: "cannot securely open manifest")
     }
-    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    defer { try? handle.close() }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    var descriptorOpen = true
+    defer {
+        // Every successful path closes explicitly below.  Once an earlier operation has failed,
+        // this best-effort close cannot make that already failed manifest trustworthy.
+        if descriptorOpen { _ = close(descriptor) }
+    }
     var openedValue = stat()
     guard fstat(descriptor, &openedValue) == 0, sameFileIdentity(pathValue, openedValue) else {
         throw LaunchFailure(code: "manifest_changed", detail: "manifest changed before open")
@@ -617,6 +823,10 @@ private func loadManifest(path: String) throws -> LoadedManifest {
     let runDirectory = try checkedAbsoluteURL(decoded.runDirectory, role: "run_directory")
     try requirePrivateRunDirectory(runDirectory)
     try requireDirectChild(url, of: runDirectory, role: "manifest")
+    // A failed close can leave the descriptor state ambiguous, so do not let the defer retry a
+    // numeric descriptor that the kernel could already have released and reused.
+    descriptorOpen = false
+    try closeDescriptor(descriptor, code: "manifest_close", detail: "cannot close manifest")
     return LoadedManifest(manifest: decoded, sha256: digest)
 }
 
@@ -730,13 +940,28 @@ private func validSHA256(_ value: String) -> Bool {
     }
 }
 
+private func validRunID(_ value: String) -> Bool {
+    value.count == 32 && value.allSatisfy { character in
+        character >= "0" && character <= "9" || character >= "a" && character <= "f"
+    }
+}
+
+private func receiptRunID(_ manifest: Manifest?) -> String? {
+    guard let value = manifest?.runID, validRunID(value) else { return nil }
+    return value
+}
+
 private func hashFile(_ url: URL, role: String, expected: stat) throws -> String {
     let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
     guard descriptor >= 0 else {
         throw LaunchFailure(code: "artifact_open", detail: "cannot securely open \(role)")
     }
-    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    defer { try? handle.close() }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    var descriptorOpen = true
+    defer {
+        // The function is already failing on this path; success always performs a checked close.
+        if descriptorOpen { _ = close(descriptor) }
+    }
     var opened = stat()
     guard fstat(descriptor, &opened) == 0, sameFileIdentity(expected, opened) else {
         throw LaunchFailure(code: "artifact_changed", detail: "\(role) changed before open")
@@ -745,7 +970,9 @@ private func hashFile(_ url: URL, role: String, expected: stat) throws -> String
     let hashDeadline = ProcessInfo.processInfo.systemUptime + min(300.0, max(30.0, sizeMiB / 16.0))
     var hasher = SHA256()
     do {
-        while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
+        while let chunk = try autoreleasepool(invoking: { () throws -> Data? in
+            try handle.read(upToCount: 1_048_576)
+        }), !chunk.isEmpty {
             guard ProcessInfo.processInfo.systemUptime <= hashDeadline else {
                 throw LaunchFailure(code: "artifact_hash_timeout", detail: "\(role) hashing exceeded its deadline")
             }
@@ -760,7 +987,10 @@ private func hashFile(_ url: URL, role: String, expected: stat) throws -> String
     guard fstat(descriptor, &after) == 0, sameFileIdentity(opened, after) else {
         throw LaunchFailure(code: "artifact_changed", detail: "\(role) changed while hashing")
     }
-    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    descriptorOpen = false
+    try closeDescriptor(descriptor, code: "artifact_close", detail: "cannot close \(role) after hashing")
+    return digest
 }
 
 private func verifyArtifact(
@@ -831,11 +1061,17 @@ private func revalidateReadOnlyInput(_ artifact: VerifiedArtifact, role: String)
     guard descriptor >= 0 else {
         throw LaunchFailure(code: "artifact_open", detail: "cannot securely reopen \(role)")
     }
-    defer { _ = close(descriptor) }
+    var descriptorOpen = true
+    defer {
+        // A validation failure is already fail-closed; never retry a descriptor after close.
+        if descriptorOpen { _ = close(descriptor) }
+    }
     var opened = stat()
     guard fstat(descriptor, &opened) == 0, sameFileIdentity(artifact.identity, opened) else {
         throw LaunchFailure(code: "artifact_changed", detail: "\(role) changed before VM start")
     }
+    descriptorOpen = false
+    try closeDescriptor(descriptor, code: "artifact_close", detail: "cannot close \(role) after revalidation")
 }
 
 private func revalidateScratch(
@@ -853,7 +1089,11 @@ private func revalidateScratch(
     guard descriptor >= 0 else {
         throw LaunchFailure(code: "scratch_open", detail: "cannot securely reopen scratch disk")
     }
-    defer { _ = close(descriptor) }
+    var descriptorOpen = true
+    defer {
+        // A validation failure is already fail-closed; never retry a descriptor after close.
+        if descriptorOpen { _ = close(descriptor) }
+    }
     var opened = stat()
     guard fstat(descriptor, &opened) == 0, sameScratchIdentity(scratch.identity, opened) else {
         throw LaunchFailure(code: "scratch_identity", detail: "scratch disk changed \(role)")
@@ -864,9 +1104,14 @@ private func revalidateScratch(
         }
         try fsyncRunDirectory(runDirectory)
     }
+    descriptorOpen = false
+    try closeDescriptor(descriptor, code: "scratch_close", detail: "cannot close scratch disk after \(role)")
 }
 
 private func revalidateVMStartInputs(_ run: PreparedRun) throws {
+    try revalidateReadOnlyInput(run.kernel, role: "kernel")
+    try revalidateReadOnlyInput(run.initrd, role: "initrd")
+    try revalidateReadOnlyInput(run.rootDisk, role: "root_disk")
     if let request = run.requestDisk {
         try revalidateReadOnlyInput(request, role: "request_disk")
     }
@@ -883,9 +1128,7 @@ private func validateManifestValues(_ manifest: Manifest, mode: String) throws {
     guard manifest.schemaVersion == manifestSchemaVersion else {
         throw LaunchFailure(code: "schema_version", detail: "unsupported manifest schema")
     }
-    let runIDPattern = try! NSRegularExpression(pattern: "^[a-f0-9]{32}$")
-    let runIDRange = NSRange(manifest.runID.startIndex..., in: manifest.runID)
-    guard runIDPattern.firstMatch(in: manifest.runID, range: runIDRange) != nil else {
+    guard validRunID(manifest.runID) else {
         throw LaunchFailure(code: "run_id", detail: "run_id must be exactly 32 lowercase hexadecimal characters")
     }
     guard (1...4).contains(manifest.cpuCount) else {
@@ -936,7 +1179,11 @@ private func fsyncRunDirectory(_ runDirectory: URL) throws {
     guard descriptor >= 0 else {
         throw LaunchFailure(code: "run_directory_open", detail: "cannot securely open run_directory")
     }
-    defer { _ = close(descriptor) }
+    var descriptorOpen = true
+    defer {
+        // Directory-sync failure already fails cleanup; successful sync closes explicitly below.
+        if descriptorOpen { _ = close(descriptor) }
+    }
     var value = stat()
     guard fstat(descriptor, &value) == 0,
           (value.st_mode & S_IFMT) == S_IFDIR,
@@ -948,6 +1195,8 @@ private func fsyncRunDirectory(_ runDirectory: URL) throws {
     guard fsync(descriptor) == 0 else {
         throw LaunchFailure(code: "run_directory_fsync", detail: "cannot fsync run_directory")
     }
+    descriptorOpen = false
+    try closeDescriptor(descriptor, code: "run_directory_close", detail: "cannot close run_directory")
 }
 
 private func removeScratchAndProveAbsent(
@@ -1017,6 +1266,7 @@ private func createReservedScratch(
         throw LaunchFailure(code: "scratch_create", detail: "cannot create scratch disk")
     }
     var descriptorOpen = true
+    var descriptorCloseUnproven = false
     var createdIdentity: stat?
     let preparationDeadline = ProcessInfo.processInfo.systemUptime + maximumScratchPreparationSeconds
     do {
@@ -1066,11 +1316,8 @@ private func createReservedScratch(
                 detail: "scratch preparation exceeded its deadline"
             )
         }
-        let closeResult = close(descriptor)
         descriptorOpen = false
-        guard closeResult == 0 else {
-            throw LaunchFailure(code: "scratch_close", detail: "cannot close finalized scratch disk")
-        }
+        try closeDescriptor(descriptor, code: "scratch_close", detail: "cannot close finalized scratch disk")
         try fsyncRunDirectory(runDirectory)
         let afterClose = try lstatValue(url.path, role: "scratch_disk")
         guard sameFileIdentity(finalized, afterClose) else {
@@ -1079,8 +1326,11 @@ private func createReservedScratch(
         try cancellation.checkpoint("VM configuration")
         return PreparedScratch(url: url, identity: finalized)
     } catch {
-        if descriptorOpen { _ = close(descriptor) }
-        guard removeScratchAndProveAbsent(
+        if descriptorOpen {
+            descriptorOpen = false
+            descriptorCloseUnproven = close(descriptor) != 0
+        }
+        guard !descriptorCloseUnproven, removeScratchAndProveAbsent(
             url,
             expectedIdentity: createdIdentity,
             in: runDirectory
@@ -1292,6 +1542,8 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
     private var stopDeadlineTimer: DispatchSourceTimer?
     private var requestedStopReason: String?
     private var stopInFlight = false
+    private var startAttempted = false
+    private var startCompletionObserved = false
     private(set) var finished = false
     private(set) var outcome: StopOutcome?
     private var startedAt: String?
@@ -1327,8 +1579,10 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
         signalTimer.resume()
         cancellationPoll = signalTimer
 
+        startAttempted = true
         virtualMachine.start { [weak self] result in
             guard let self else { return }
+            self.startCompletionObserved = true
             switch result {
             case .success:
                 self.startedAt = timestamp()
@@ -1342,7 +1596,8 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
                 self.finish(
                     status: "failed",
                     reason: "start_failed",
-                    errorCode: "vz_start_\(nsError.code)"
+                    errorCode: "vz_start_\(nsError.code)",
+                    stopConfirmed: self.virtualMachine.state == .stopped
                 )
             }
         }
@@ -1354,7 +1609,11 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
             status: "failed",
             reason: "missing_outcome",
             startedAt: startedAt,
-            errorCode: "internal_state"
+            errorCode: "internal_state",
+            startAttempted: startAttempted,
+            startCompletionObserved: startCompletionObserved,
+            startSucceeded: startedAt != nil,
+            stopConfirmed: false
         )
     }
 
@@ -1384,7 +1643,12 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
 
     private func finishRequestedStop() {
         guard let reason = requestedStopReason else { return }
-        finish(status: statusForRequestedStop(), reason: reason, errorCode: nil)
+        finish(
+            status: statusForRequestedStop(),
+            reason: reason,
+            errorCode: nil,
+            stopConfirmed: true
+        )
     }
 
     private func tryStop() {
@@ -1422,7 +1686,12 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
         }
     }
 
-    private func finish(status: String, reason: String, errorCode: String?) {
+    private func finish(
+        status: String,
+        reason: String,
+        errorCode: String?,
+        stopConfirmed: Bool = false
+    ) {
         guard !finished else { return }
         timer?.cancel()
         cancellationPoll?.cancel()
@@ -1432,7 +1701,11 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
             status: status,
             reason: reason,
             startedAt: startedAt,
-            errorCode: errorCode
+            errorCode: errorCode,
+            startAttempted: startAttempted,
+            startCompletionObserved: startCompletionObserved,
+            startSucceeded: startedAt != nil,
+            stopConfirmed: stopConfirmed
         )
         finished = true
     }
@@ -1442,10 +1715,19 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
             finish(status: "failed", reason: "stop_unproven", errorCode: "vz_guest_stop_state")
             return
         }
+        // This delegate is delivered only for a guest that reached the running lifecycle.  The
+        // start completion may still be queued, so do not misclassify its scratch as a failed
+        // start or skip the required post-stop revalidation.
+        if startedAt == nil { startedAt = timestamp() }
         if requestedStopReason != nil {
             finishRequestedStop()
         } else {
-            finish(status: "guest_stopped", reason: "guest_shutdown", errorCode: nil)
+            finish(
+                status: "guest_stopped",
+                reason: "guest_shutdown",
+                errorCode: nil,
+                stopConfirmed: true
+            )
         }
     }
 
@@ -1453,7 +1735,8 @@ private final class VMController: NSObject, VZVirtualMachineDelegate {
         finish(
             status: "failed",
             reason: "guest_error",
-            errorCode: "vz_guest_\(String(describing: type(of: error)))"
+            errorCode: "vz_guest_\(String(describing: type(of: error)))",
+            stopConfirmed: virtualMachine.state == .stopped
         )
     }
 }
@@ -1495,9 +1778,13 @@ private func main() -> Int32 {
     let cancellation = SignalCancellation()
 
     do {
+        try closeInheritedFileDescriptors()
+        try applyHostProcessLimits()
+#if LEFTOVERS_TESTING
+        try verifyTestDescriptorClosed()
+#endif
         try cancellation.install()
         try cancellation.checkpoint("launcher setup")
-        try applyHostProcessLimits()
         let loaded = try loadManifest(path: ProcessInfo.processInfo.arguments[2])
         manifest = loaded.manifest
         manifestSHA256 = loaded.sha256
@@ -1564,8 +1851,15 @@ private func main() -> Int32 {
         )
         let outcome = try controller.run { try revalidateVMStartInputs(run) }
         runOutcome = outcome
-        scratchRetained = outcome.startedAt != nil
-        if outcome.startedAt != nil {
+        // Remove scratch only after the framework has both reported a completed start failure
+        // and definitely reached .stopped. Every successful, ambiguous, or failed-but-unproven
+        // start attempt retains its attachment for an external cleanup verifier.
+        let failedStartDefinitelyStopped = outcome.startAttempted
+            && outcome.startCompletionObserved
+            && !outcome.startSucceeded
+            && outcome.stopConfirmed
+        scratchRetained = !failedStartDefinitelyStopped
+        if outcome.startSucceeded, outcome.stopConfirmed {
             try revalidateScratchAfterStop(run)
         }
         if !scratchRetained {
@@ -1629,7 +1923,7 @@ private func main() -> Int32 {
                 schemaVersion: receiptSchemaVersion,
                 launcherVersion: launcherVersion,
                 manifestSHA256: manifestSHA256,
-                runID: manifest?.runID,
+                runID: receiptRunID(manifest),
                 mode: mode,
                 status: "failed",
                 startedAt: runOutcome?.startedAt,
@@ -1667,7 +1961,7 @@ private func main() -> Int32 {
                 schemaVersion: receiptSchemaVersion,
                 launcherVersion: launcherVersion,
                 manifestSHA256: manifestSHA256,
-                runID: manifest?.runID,
+                runID: receiptRunID(manifest),
                 mode: mode,
                 status: "failed",
                 startedAt: runOutcome?.startedAt,

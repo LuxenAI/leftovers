@@ -27,9 +27,11 @@ meter provider calls, impose a hard token ceiling, or replace a supported provid
    budget-ledger, publication-ledger, or GitHub mutation interface.
 
 The existing local Docker/Podman and host-agent paths are rehearsal-only. Production admission
-rejects them before budget, discovery, or acquisition. A new macOS launcher proof constructs a
-per-run Virtualization.framework VM with no NIC, socket, or directory share, but it is deliberately
-not wired into this lifecycle until the guest, model mediation, and bounded result extractor exist.
+rejects them before budget, discovery, or acquisition. Docker Sandboxes (`sbx`) is the active
+integration candidate, but its boundary facade is source-disabled and its compatibility rehearsal
+is shell-only: it performs no provider or Terra/high call. The custom
+Virtualization.framework launcher is archival source-disabled research, not an operator activation
+path. Neither candidate changes the non-overridable production gate.
 
 ## Lifecycle
 
@@ -105,7 +107,18 @@ Planning and review mount the rehearsal workspace read-only. Implementation moun
 repository writable. Training cannot exercise a bridge override: an attempted override is rejected
 before budget, discovery, workspace creation, or runtime inspection.
 
-The strict VM manifest contains boot artifacts and resource limits only. Manifest v2 separates
+The active `sbx` candidate is intentionally narrower than an execution backend. Its probe pins the
+CLI identity; checks one exact global `service/openai` secret inventory; samples a fixed OpenAI-allow
+and non-OpenAI-deny network canary matrix; creates one clone-mode shell sandbox; and checks ports,
+observed environment names, fixed clone-write canaries, and exact-name cleanup. Those finite checks
+and the name-based lifecycle are useful
+negative evidence, not an attestation of the complete daemon, policy, proxy, or credential boundary.
+`SbxBoundary.provision()` remains source-disabled before command I/O, and `leftovers run --execute`
+still denies before budget or discovery. A future activation must satisfy the full strict evidence
+contract, including credential isolation, bounded post-stop extraction, fresh verification, and
+proven cleanup.
+
+The archival strict-VM manifest contains boot artifacts and resource limits only. Manifest v2 separates
 root- or dedicated-account-owned immutable boot files from a launcher-owned private per-run directory
 containing the sealed manifest, optional read-only request disk, and fresh preallocated writable
 scratch disk. Hardware is fixed in code with zero network/socket/share/interactive devices, and

@@ -91,13 +91,33 @@ class StrictVMLauncherSourceTests(unittest.TestCase):
             "setrlimit(RLIMIT_CORE",
             "setrlimit(RLIMIT_NOFILE",
             "maximumHostFileDescriptors",
+            "proc_pidinfo",
+            "procPIDListFDs",
+            "procFDInfoRecordBytes = 8",
+            "MemoryLayout<ProcessFileDescriptor>.size == procFDInfoRecordBytes",
+            "LEFTOVERS_TEST_PROC_PIDINFO_FAULT",
+            "private func closeDescriptor",
+            'code: "manifest_close"',
+            'code: "artifact_close"',
+            'code: "run_directory_close"',
+            "closeInheritedFileDescriptors",
+            "inheritedProcessFileDescriptors",
+            'code: "host_descriptor_cleanup"',
             "hostFreeSpaceReserve",
             "requireScratchCapacity",
             "maximumScratchPreparationSeconds",
+            "maximumReceiptBytes",
+            'errorCode: "receipt_oversize"',
             'code: "artifact_hash_timeout"',
             'code: "scratch_cleanup_unproven"',
         ):
             self.assertIn(token, self.source)
+        self.assertNotIn("try? handle.close()", self.source)
+        self.assertNotIn("for descriptor in Int32(3)..<", self.source)
+        self.assertLess(
+            self.source.index("try closeInheritedFileDescriptors()"),
+            self.source.index("try applyHostProcessLimits()"),
+        )
 
     def test_run_mode_requires_request_disk_and_exact_installed_resources(self) -> None:
         for token in (
@@ -132,6 +152,13 @@ class StrictVMLauncherSourceTests(unittest.TestCase):
             controller.index("private func tryStop"),
         )
         self.assertIn("guard !stopInFlight else { return }", controller)
+        self.assertIn("private var startAttempted = false", controller)
+        self.assertIn("private var startCompletionObserved = false", controller)
+        self.assertIn("startAttempted = true", controller)
+        self.assertIn("self.startCompletionObserved = true", controller)
+        self.assertIn("stopConfirmed: true", controller)
+        self.assertIn("stopConfirmed: self.virtualMachine.state == .stopped", controller)
+        self.assertIn("if startedAt == nil { startedAt = timestamp() }", controller)
         self.assertIn(
             "if requestedStopReason != nil {\n            finishRequestedStop()", controller
         )
@@ -148,8 +175,26 @@ class StrictVMLauncherSourceTests(unittest.TestCase):
         self.assertIn("private func revalidateScratchAfterStop", self.source)
         self.assertIn("try controller.run { try revalidateVMStartInputs(run) }", self.source)
         self.assertIn("try revalidateScratchAfterStop(run)", self.source)
+        for token in (
+            'revalidateReadOnlyInput(run.kernel, role: "kernel")',
+            'revalidateReadOnlyInput(run.initrd, role: "initrd")',
+            'revalidateReadOnlyInput(run.rootDisk, role: "root_disk")',
+            "let failedStartDefinitelyStopped = outcome.startAttempted",
+            "&& outcome.startCompletionObserved",
+            "&& !outcome.startSucceeded",
+            "&& outcome.stopConfirmed",
+            "scratchRetained = !failedStartDefinitelyStopped",
+            "if outcome.startSucceeded, outcome.stopConfirmed",
+        ):
+            self.assertIn(token, self.source)
         self.assertIn("fchmod(descriptor, S_IRUSR | S_IWUSR)", self.source)
         self.assertIn("try fsyncRunDirectory(runDirectory)", self.source)
+
+    def test_large_inputs_cannot_expand_receipts_or_hashing_memory_without_bound(self) -> None:
+        self.assertIn("private func receiptRunID", self.source)
+        self.assertIn("runID: receiptRunID(manifest)", self.source)
+        self.assertIn("autoreleasepool(invoking:", self.source)
+        self.assertIn("handle.read(upToCount: 1_048_576)", self.source)
 
     def test_boot_contract_is_initramfs_only_and_internal(self) -> None:
         self.assertIn('"console=hvc0"', self.source)
@@ -232,7 +277,11 @@ class StrictVMLauncherBehaviorTests(unittest.TestCase):
         cls.temporary.cleanup()
 
     def run_launcher(
-        self, manifest: dict[str, object], *, mode: int = 0o400
+        self,
+        manifest: dict[str, object],
+        *,
+        mode: int = 0o400,
+        environment: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         run = Path(str(manifest["run_directory"]))
         run.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -244,7 +293,7 @@ class StrictVMLauncherBehaviorTests(unittest.TestCase):
         )
         path.chmod(mode)
         self.last_manifest_path = path
-        return self.invoke_launcher(path)
+        return self.invoke_launcher(path, environment=environment)
 
     def invoke_launcher(
         self,
@@ -252,15 +301,35 @@ class StrictVMLauncherBehaviorTests(unittest.TestCase):
         *,
         environment: dict[str, str] | None = None,
         mode: str = "--check",
+        pass_fds: tuple[int, ...] = (),
+        inherited_fd_limit: int | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        command = [str(self.binary), mode, str(path)]
+        if inherited_fd_limit is not None:
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "import os, resource, sys\n"
+                    "limit = int(sys.argv[1])\n"
+                    "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+                    "if limit > soft:\n"
+                    "    raise RuntimeError('test limit exceeds inherited soft limit')\n"
+                    "resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))\n"
+                    "os.execve(sys.argv[2], sys.argv[2:], os.environ)\n"
+                ),
+                str(inherited_fd_limit),
+                *command,
+            ]
         result = subprocess.run(
-            [str(self.binary), mode, str(path)],
+            command,
             check=False,
             cwd=ROOT,
             capture_output=True,
             text=True,
             timeout=10,
             env=environment,
+            pass_fds=pass_fds,
         )
         receipt = json.loads(result.stdout)
         self.assertEqual(
@@ -284,6 +353,68 @@ class StrictVMLauncherBehaviorTests(unittest.TestCase):
             },
         )
         return result, receipt
+
+    def test_early_setup_closes_high_inherited_descriptor_before_manifest_or_vm_work(self) -> None:
+        high_descriptor = next(
+            descriptor
+            for descriptor in range(512, 255, -1)
+            if self._descriptor_is_closed(descriptor)
+        )
+        source_descriptor = os.open("/dev/null", os.O_RDONLY)
+        try:
+            os.dup2(source_descriptor, high_descriptor, inheritable=True)
+            environment = os.environ.copy()
+            environment["LEFTOVERS_TEST_EXPECT_CLOSED_FD"] = str(high_descriptor)
+            result, receipt = self.invoke_launcher(
+                Path("/private/leftovers-intentionally-missing-manifest.json"),
+                environment=environment,
+                pass_fds=(high_descriptor,),
+                inherited_fd_limit=256,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            # The wrapper lowers the inherited soft limit after FD 512 exists but before exec.
+            # Reaching path validation proves the test-only early-setup assertion saw EBADF;
+            # the missing manifest prevents artifact preparation and any VM attempt.
+            self.assertEqual(receipt["error_code"], "path_lstat", result.stderr)
+        finally:
+            os.close(source_descriptor)
+            os.close(high_descriptor)
+
+    @staticmethod
+    def _descriptor_is_closed(descriptor: int) -> bool:
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            return True
+        return False
+
+    def test_early_setup_rejects_faulted_descriptor_snapshots_before_manifest_access(self) -> None:
+        for fault in (
+            "zero_first",
+            "zero_second",
+            "malformed_first",
+            "malformed_second",
+            "negative_record",
+            "duplicate_record",
+        ):
+            with self.subTest(fault=fault):
+                environment = os.environ.copy()
+                environment["LEFTOVERS_TEST_PROC_PIDINFO_FAULT"] = fault
+                result, receipt = self.invoke_launcher(
+                    Path("/private/leftovers-intentionally-missing-manifest.json"),
+                    environment=environment,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(receipt["error_code"], "host_descriptor_snapshot", result.stderr)
+
+    def test_manifest_close_failure_is_fail_closed_before_artifact_preparation(self) -> None:
+        manifest = self.minimal_manifest()
+        environment = os.environ.copy()
+        environment["LEFTOVERS_TEST_CLOSE_DESCRIPTOR_FAILURE"] = "manifest_close"
+        result, receipt = self.run_launcher(manifest, environment=environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(receipt["error_code"], "manifest_close", result.stderr)
+        self.assertFalse((Path(str(manifest["run_directory"])) / "scratch.raw").exists())
 
     def test_run_mode_rejects_missing_request_before_artifact_or_scratch_access(self) -> None:
         manifest = self.minimal_manifest()

@@ -27,7 +27,7 @@ class _FakeRehearsalReport:
 
 
 class CliTests(unittest.TestCase):
-    def test_doctor_never_treats_oci_rehearsal_as_strict_vm_readiness(self) -> None:
+    def test_doctor_never_treats_oci_rehearsal_as_sbx_readiness(self) -> None:
         config = SimpleNamespace(
             agent=SimpleNamespace(backend="container"),
             github=SimpleNamespace(token_env="LEFTOVERS_GITHUB_READ_TOKEN"),
@@ -43,7 +43,7 @@ class CliTests(unittest.TestCase):
         ):
             ok, checks = _doctor(config)
 
-        strict = next(check for check in checks if check["name"] == "strict_vm_execution")
+        strict = next(check for check in checks if check["name"] == "sbx_execution")
         self.assertFalse(ok)
         self.assertFalse(strict["ok"])
         self.assertEqual(strict["severity"], "error")
@@ -68,6 +68,82 @@ class CliTests(unittest.TestCase):
                 "process_group": 4242,
             },
         )
+
+    def test_sbx_rehearsal_cli_uses_pinned_identity_and_reports_no_agent_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = SimpleNamespace(
+                temp_root=root / "workspaces",
+                sbx=SimpleNamespace(
+                    binary_path="/opt/homebrew/Caskroom/sbx/0.35.0/bin/sbx",
+                    version="v0.35.0",
+                    revision="01e01520456e4126a9653471e7072e4d9b280321",
+                    binary_sha256="a" * 64,
+                    cleanup_timeout_seconds=120,
+                ),
+            )
+            receipt = SimpleNamespace(
+                state="doctor_only",
+                name=None,
+                fixture_path=None,
+                final_absent=False,
+                doctor=SimpleNamespace(
+                    identity=SimpleNamespace(
+                        binary=Path(config.sbx.binary_path),
+                        version=config.sbx.version,
+                        revision=config.sbx.revision,
+                        sha256=config.sbx.binary_sha256,
+                    ),
+                    sandbox_names=frozenset(),
+                    openai_secret_configured=True,
+                    github_secret_configured=False,
+                ),
+            )
+            probe = SimpleNamespace(rehearse=lambda **_kwargs: receipt)
+            stdout = io.StringIO()
+            with (
+                patch("leftovers.cli.load_config", return_value=config),
+                patch("leftovers.cli.os.geteuid", return_value=501),
+                patch("leftovers.cli.SbxCompatibilityProbe", return_value=probe) as probe_type,
+                redirect_stdout(stdout),
+            ):
+                status = main(["--config", "unused.toml", "sbx-rehearsal"])
+
+            self.assertEqual(status, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["state"], "doctor_only")
+            self.assertFalse(payload["production_execution_authorized"])
+            self.assertFalse(payload["ai_agent_started"])
+            self.assertFalse(payload["github_secret_configured"])
+            self.assertTrue(payload["openai_secret_configured"])
+            self.assertEqual(payload["preexisting_sandbox_count"], 0)
+            probe_type.assert_called_once()
+            self.assertEqual(
+                stat.S_IMODE((root / "workspaces" / "sbx-rehearsal").stat().st_mode), 0o700
+            )
+
+    def test_sbx_rehearsal_error_is_structured_and_root_is_rejected_before_probe(self) -> None:
+        config = SimpleNamespace(
+            temp_root=Path("/unused"),
+            sbx=SimpleNamespace(
+                binary_path="/opt/homebrew/Caskroom/sbx/0.35.0/bin/sbx",
+                version="v0.35.0",
+                revision="01e01520456e4126a9653471e7072e4d9b280321",
+                binary_sha256="a" * 64,
+                cleanup_timeout_seconds=120,
+            ),
+        )
+        stderr = io.StringIO()
+        with (
+            patch("leftovers.cli.load_config", return_value=config),
+            patch("leftovers.cli.os.geteuid", return_value=0),
+            patch("leftovers.cli.SbxCompatibilityProbe") as probe_type,
+            redirect_stderr(stderr),
+        ):
+            status = main(["--config", "unused.toml", "sbx-rehearsal"])
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["error"], "SbxRehearsalError")
+        probe_type.assert_not_called()
 
     def test_cleanup_protects_container_and_reserved_controller_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

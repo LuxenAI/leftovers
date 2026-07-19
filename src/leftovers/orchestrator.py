@@ -36,12 +36,11 @@ from .policy import (
 from .prompts import render_prompt
 from .publisher import GhPublisher, PublicationError, create_approval_bundle
 from .runner import AgentOutputError, AgentRunner, RunnerCleanupError, RunnerError
+from .sbx import DOCKER_SANDBOX_EXECUTION_ENABLED
 from .scoring import score_issue
 from .state import PublicationLedger, StatePolicyError
 from .telemetry import TERMINAL_RUN_STAGES, TelemetryWriter
 from .workspace import WorkspaceError, WorkspaceLease
-
-STRICT_VM_WHOLE_CYCLE_CAPABILITY = False
 
 # ``run_kind`` is observability metadata, not an authority selector.  The only
 # exception is the deterministic rehearsal, whose three local components carry
@@ -60,7 +59,8 @@ def _attest_training_rehearsal_component(component_type: type[Any], role: str) -
 
     This is intentionally private.  It is used only by ``leftovers.rehearsal``
     and by dedicated in-tree test doubles.  It is not a production capability:
-    production execution continues to require the strict-VM whole-cycle gate.
+    production execution continues to require the source-disabled strict
+    whole-cycle evidence gate.
     """
 
     if role not in _TRAINING_REHEARSAL_ROLES or not isinstance(component_type, type):
@@ -802,12 +802,12 @@ class ContributionOrchestrator:
                 )
                 journal.append("isolation_preflight_denied", reason=outcome.message)
                 return finish_without_resources()
-            if not STRICT_VM_WHOLE_CYCLE_CAPABILITY:
+            if not DOCKER_SANDBOX_EXECUTION_ENABLED:
                 outcome.stage = RunStage.ABORTED
                 outcome.failure_code = FailureCode.POLICY_DENIED
                 outcome.message = (
-                    "unattended production isolation denied: controller-owned strict whole-cycle "
-                    "VM capability is disabled"
+                    "unattended production isolation denied: Docker Sandboxes execution "
+                    "capability is source-disabled pending live boundary evidence"
                 )
                 journal.append("isolation_preflight_denied", reason=outcome.message)
                 return finish_without_resources()

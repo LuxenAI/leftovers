@@ -37,6 +37,29 @@ the latter's exact extent with `BLKGETSIZE64` and independently requiring `BLKRO
 wire name for the public `prior_observations` API argument is the bounded 9-byte `prior_obs`; every
 section name fits the fixed 16-byte table field, including exact-width `cumulative_patch`.
 
+## Future LFSC v1 source capsule contract
+
+The old opaque-archive idea is replaced by the source-disabled **LFSC v1** regular-file capsule
+defined in `src/leftovers/strict_vm_source_capsule.py`. A future guest parser receives only a
+pre-opened capsule descriptor, never a host pathname, and validates without extraction: a fixed
+big-endian header, length-prefixed UTF-8 NFC relative paths in canonical depth-first component order,
+fixed canonical file modes (`0644` or `0755`), per-file SHA-256, whole-payload SHA-256, and zero
+alignment padding. Component order compares each path component's raw UTF-8 bytes; it is deliberately
+not flat serialized-path ordering, so `a/x` precedes the sibling file `a.txt`.
+It rejects absolute/dot/control/`.git` components, duplicates or reordering, truncation/overlap/trailing
+bytes, digest drift, and nonzero padding. The source-side fixture packer accepts only an owner-private
+`0700` directory descriptor containing owner-private single-link regular `0600`/`0700` files and a
+pre-opened owner-private single-link `0600` output descriptor. It uses no caller paths, chunked I/O,
+close-on-exec descriptors, pre/post `fstat` checks, directory-mutation detection, explicit close-error
+handling, and fsyncs payload bytes before it writes the complete digest-bearing header. A descriptor
+preflight rejects an output inode anywhere in the source tree before writing the incomplete header;
+the streaming pass checks the inode again before reading file content. The fixed bounds match the
+guest's source tree contract: 2,048 files, depth 32, 240-byte paths, 1 MiB/file, and 32 MiB total
+content.
+
+Packing remains fixture-capability-only and production-source-gated. LFSC does not parse GitHub
+archives, extract guest files, execute anything, contact a provider, launch a VM, or authorize a write.
+
 ## Reproducible inputs
 
 [`SOURCES.lock.json`](SOURCES.lock.json) records the official Buildroot `2026.05.1` release tag

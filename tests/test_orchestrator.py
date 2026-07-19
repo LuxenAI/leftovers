@@ -319,7 +319,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(outcome.stage, RunStage.ABORTED)
         self.assertEqual(outcome.failure_code, FailureCode.POLICY_DENIED)
-        self.assertIn("agent.backend must be strict-vm", outcome.message)
+        self.assertIn("agent.backend must be sbx", outcome.message)
         budget_snapshot.assert_not_called()
         self.assertFalse((root / "work").exists())
 
@@ -359,9 +359,7 @@ class OrchestratorTests(unittest.TestCase):
             ).run(execute_work=True, publish=False)
         self.assertEqual(outcome.stage, RunStage.ABORTED)
         self.assertEqual(outcome.failure_code, FailureCode.POLICY_DENIED)
-        self.assertIn(
-            "controller-owned strict whole-cycle VM capability is disabled", outcome.message
-        )
+        self.assertIn("Docker Sandboxes execution capability is source-disabled", outcome.message)
         budget_snapshot.assert_not_called()
         scout.assert_not_called()
         self.assertFalse((root / "work").exists())

@@ -40,6 +40,7 @@ SCRIPT_FILES = (
     "install_macos.py",
     "macos_job.py",
     "rehearsal_agent.py",
+    "sbx-rehearsal.sh",
     "status-macos.sh",
     "status_macos.py",
     "uninstall-macos.sh",

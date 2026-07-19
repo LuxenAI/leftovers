@@ -1,8 +1,11 @@
 # Agent adapters
 
 Leftovers defines a provider-neutral process contract. The stock sandbox image supplies the
-rehearsal environment only. Container or host adapters cannot currently pass production admission;
-a future deployment must integrate them behind the strict VM boundary before it can publish.
+rehearsal environment only. Container or host adapters cannot currently pass production admission.
+Docker Sandboxes is the active integration candidate, but its present rehearsal is shell-only and
+does not run an adapter, Codex, a provider call, or Terra/high inference; its execution facade is
+source-disabled. A future deployment must satisfy the separately reviewed strict evidence contract
+before it can publish.
 
 For deterministic adapter testing, the repository also ships `scripts/codex_adapter.py`: a
 **host-agent, rehearsal-only** adapter for the headless Codex CLI. It pins the model to
@@ -35,8 +38,9 @@ Those controls are useful for tests, not a substitute for a separate trust bound
 - The production orchestrator rejects host backends before budget, discovery, clone, or model work.
 
 Use it only with the limits in [`MACOS_PACKAGE.md`](MACOS_PACKAGE.md) and the risk model in
-[`../SECURITY.md`](../SECURITY.md). A production implementation still needs the strict VM guest and
-a narrow model mediator that keeps provider credentials outside untrusted repository code.
+[`../SECURITY.md`](../SECURITY.md). A production implementation still needs a narrow model mediator
+that keeps provider credentials outside untrusted repository code and the full strict evidence
+contract; a no-agent sbx rehearsal is not an adapter authorization.
 
 ## Process contract
 
@@ -85,11 +89,11 @@ validation rejects GitHub tokens, SSH-agent sockets, and runtime sockets. That a
 a direct provider secret safe: the coding agent can execute untrusted repository code in the same
 container, and a networked stage could expose the secret.
 
-The strict VM has no NIC or socket, so a generic external broker is not yet available. Any future
-mediator must keep credentials outside the worker, expose only bounded inference semantics, and
-avoid general egress or a host-command channel. A provider CLI on the host cannot satisfy that
-boundary merely because its tool subprocesses use a sandbox. Production also rejects direct
-provider environment variables and every bridge-network override.
+The archival strict-VM research has no NIC or socket, so it does not provide a generic external
+broker. Any future mediator must keep credentials outside the worker, expose only bounded inference
+semantics, and avoid general egress or a host-command channel. A provider CLI on the host cannot
+satisfy that boundary merely because its tool subprocesses use a sandbox. Production also rejects
+direct provider environment variables and every bridge-network override.
 
 [`CODEX_CLI_MEDIATOR.md`](CODEX_CLI_MEDIATOR.md) records a separate hard-disabled Codex
 subscription mediator protocol: canonical provider envelopes, controller-derived patch digests,
@@ -97,7 +101,7 @@ exact usage arithmetic, and crash-conservative hash-chained token reservations. 
 make the CLI runnable. Activation requires official version-pinned proof that every model tool
 surface is disabled and a credential topology that never reaches the VM guest.
 
-Do not claim autonomous operation until the strict VM guest, narrow credential-isolating model mediator,
-bounded result extractor, chosen adapter, and cleanup path are integrated and exercised with live
-adversarial evidence and no remote write. Adapter or OCI rehearsal checks alone do not authorize
-production.
+Do not claim autonomous operation until the strict source-disabled execution boundary, narrow
+credential-isolating model mediator, bounded result extractor, chosen adapter, and cleanup path are
+integrated and exercised with live adversarial evidence and no remote write. Adapter, OCI, or sbx
+rehearsal checks alone do not authorize production.

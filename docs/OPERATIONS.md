@@ -38,9 +38,27 @@ install root.
 
 Repository discovery does not add an allowlist entry, enable AI contributions, start an execution,
 or publish. The bundled configuration has a placeholder repository, but even a curated repository
-cannot bypass the strict-VM gate. Docker/Podman availability does not change that status. Successful
-read-only scouting and a supplemental Seatbelt rehearsal are the only expected outcomes. See
+cannot bypass the strict source-disabled execution gate. Docker/Podman availability does not change
+that status. Successful read-only scouting and a supplemental Seatbelt rehearsal are the only
+expected outcomes. See
 [`MACOS_PACKAGE.md`](MACOS_PACKAGE.md) and [`../vm/README.md`](../vm/README.md).
+
+## Docker Sandboxes candidate rehearsal
+
+The independent, one-shot sbx command is:
+
+```sh
+./scripts/sbx-rehearsal.sh --execute
+```
+
+It is independent of the Codex desktop app and this task, and it is not a contribution cycle. After
+the read-only checks it creates/removes one randomly controller-named clone-mode `shell` sandbox to
+run fixed port, environment, clone-write, and cleanup canaries. It does not start an agent, call a
+provider, or invoke Terra/high. The name-based lifecycle is not sandbox-ownership attestation. The
+command remains useful only as no-agent rehearsal evidence; it does not spend the quota envelope or
+alter the source-disabled `leftovers run --execute` gate. Follow
+[`DOCKER_SANDBOXES.md`](DOCKER_SANDBOXES.md) for the required exact global OpenAI service secret,
+Locked Down policy allow rule, finite-canary limitation, and installed Keychain `-50` blocker.
 
 ## First activation
 
@@ -48,13 +66,15 @@ read-only scouting and a supplemental Seatbelt rehearsal are the only expected o
 2. Curate a small repository allowlist and record current licenses, contribution rules, AI policy,
    default branch, forbidden paths, and exact offline checks. If AI contributions are allowed, record
    the policy's HTTPS source and the date it was actually checked.
-3. Build a provider-specific rehearsal image from `sandbox/Dockerfile` without credentials.
-4. Run `validate`, `doctor`, fixture scout, the OCI training cycle, and live scout. `doctor` must
-   continue to fail its strict-VM execution check until the guest integration is complete.
-5. Inspect audit journals and confirm every temporary workspace is gone.
-6. Only after a separately reviewed strict runner has an integrated guest, narrow model mediator,
-   bounded result extractor, and live escape/resource/cleanup evidence, enable `draft-pr`, set the
-   standing acknowledgement, and use a dedicated public-only contributor identity. Record the exact
+3. Optionally prepare the active sbx candidate and run its standalone shell rehearsal. It must retain
+   `production_execution_authorized: false` even on success.
+4. Build a provider-specific rehearsal image from `sandbox/Dockerfile` without credentials.
+5. Run `validate`, `doctor`, fixture scout, the OCI training cycle, and live scout. `doctor` must
+   continue to report `sbx_execution: false` until the strict evidence contract is complete.
+6. Inspect audit journals and confirm every temporary workspace is gone.
+7. Only after a separately reviewed strict runner has an integrated, credential-isolating model
+   mediator, bounded result extractor, and live escape/resource/cleanup evidence, enable `draft-pr`,
+   set the standing acknowledgement, and use a dedicated public-only contributor identity. Record the exact
    `publication.expected_login` and immutable numeric
    `publication.expected_user_id`; a mismatch must stop publication. Keep per-window and
    per-repository output caps small.
@@ -120,8 +140,8 @@ and repository cooldowns independently bound draft PR output.
 
 In the current release, a production scheduler reaches the strict-isolation preflight and returns
 `policy_denied` before budget/discovery. Do not install the daily/weekly execute schedules expecting
-contribution work until a strict VM runner replaces the stock runner. The separate macOS preview
-installer remains the supported read-only scouting path.
+contribution work until a strict execution backend is independently reviewed, integrated, and
+live-attested. The separate macOS preview installer remains the supported read-only scouting path.
 
 The wrapper reads `.leftovers/scheduler.env` when present, or the exact path in
 `LEFTOVERS_ENV_FILE`. It accepts literal `KEY=value` lines only: no quote processing, variable
@@ -229,8 +249,8 @@ not enabled by this repository.
 - `deferred`: wait for the next window; do not bypass the reserve.
 - `no_candidate`: normal; do not lower policy just to consume quota.
 - `runtime_unavailable`: for an OCI rehearsal, install/configure a container runtime separately;
-  Leftovers never installs host packages. A container runtime does not satisfy the strict VM
-  production requirement.
+  Leftovers never installs host packages. Runtime availability alone does not satisfy the strict
+  production evidence contract.
 - `test_failed` or `review_rejected`: retain audit evidence, not the workspace; reconsider next run.
 - `upstream_moved`: rediscover and reverify from the new base.
 - `publish_partial`: stop automatic writes. Inspect the contributor fork for
