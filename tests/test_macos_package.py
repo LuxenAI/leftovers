@@ -46,6 +46,17 @@ class MacOSPackageTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(root))
         return root
 
+    def test_package_builder_rejects_a_missing_declared_tree(self) -> None:
+        root = self.private_root()
+        with (
+            patch.object(builder, "ROOT", root),
+            patch.object(builder, "TOP_LEVEL_FILES", ()),
+            patch.object(builder, "SCRIPT_FILES", ()),
+            patch.object(builder, "TREE_ROOTS", ("docs",)),
+            self.assertRaisesRegex(builder.PackageError, "required package tree"),
+        ):
+            builder._source_files()
+
     def test_rendered_preview_config_is_valid_and_cannot_publish(self) -> None:
         root = self.private_root()
         adapter = root / "lib" / "codex_adapter.py"

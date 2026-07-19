@@ -66,9 +66,12 @@ def _source_files() -> tuple[Path, ...]:
     paths = [ROOT / name for name in TOP_LEVEL_FILES]
     paths.extend(ROOT / "scripts" / name for name in SCRIPT_FILES)
     for tree_name in TREE_ROOTS:
+        tree_root = ROOT / tree_name
+        if tree_root.is_symlink() or not tree_root.is_dir():
+            raise PackageError(f"required package tree is missing or unsafe: {tree_root}")
         paths.extend(
             path
-            for path in (ROOT / tree_name).rglob("*")
+            for path in tree_root.rglob("*")
             if path.is_file()
             and not path.is_symlink()
             and "__pycache__" not in path.parts

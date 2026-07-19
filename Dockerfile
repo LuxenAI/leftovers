@@ -36,6 +36,7 @@ COPY --chown=leftovers:leftovers .github /app/.github
 COPY --chown=leftovers:leftovers src /app/src
 COPY --chown=leftovers:leftovers tests /app/tests
 COPY --chown=leftovers:leftovers config /app/config
+COPY --chown=leftovers:leftovers docs /app/docs
 COPY --chown=leftovers:leftovers examples /app/examples
 COPY --chown=leftovers:leftovers sandbox /app/sandbox
 COPY --chown=leftovers:leftovers schemas /app/schemas
