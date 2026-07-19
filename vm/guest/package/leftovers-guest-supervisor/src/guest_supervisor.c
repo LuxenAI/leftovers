@@ -1,12 +1,16 @@
 /*
  * Rejection-only PID 1 supervisor for the future Leftovers strict-VM guest.
  *
- * This source intentionally has no request parser, archive extractor, model
- * client, check runner, or result writer.  Returning without the real LFRS
- * footer makes host extraction fail closed.  Do not add a private wire format:
- * the controller-owned format is defined only in src/leftovers/vm_bundle.py.
+ * This production-reachable supervisor intentionally invokes no request
+ * parser, archive extractor, model client, check runner, or result writer.
+ * The separately compiled interpreter is source-only and statically
+ * unreachable until its complete scratch/result contract is live-attested.
+ * Returning without the real LFRS footer makes host extraction fail closed.
+ * Do not add a private wire format: the controller-owned format is defined
+ * only in src/leftovers/vm_bundle.py.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -15,28 +19,123 @@
 #include <linux/landlock.h>
 #include <linux/reboot.h>
 #include <linux/seccomp.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/reboot.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+
+/* Compiled for static coverage only. The call-site is deliberately impossible
+ * in this release; enabling it requires the separately reviewed scratch-image
+ * preparation/result-extraction contract and live VM adversarial evidence. */
+#include "guest_interpreter.c"
 
 #ifndef SYS_landlock_create_ruleset
 #define SYS_landlock_create_ruleset 444
 #define SYS_landlock_restrict_self 446
 #endif
 
+#ifndef SYS_close_range
+#define SYS_close_range 436
+#endif
+
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
+#endif
+
+#ifndef LANDLOCK_CREATE_RULESET_VERSION
+#define LANDLOCK_CREATE_RULESET_VERSION 1U
+#endif
+
 #define WORKER_UID 65534U
 #define WORKER_GID 65534U
+#define WORKER_NOFILE_LIMIT 32U
+#define WORKER_FILE_LIMIT_BYTES (8U * 1024U * 1024U)
+#define WORKER_CPU_LIMIT_SECONDS 120U
+#define WORKER_WALL_LIMIT_SECONDS 150U
+
+static bool close_all_inherited_descriptors(void) {
+    return syscall(SYS_close_range, 0U, ~0U, 0U) == 0;
+}
+
+static bool descriptor_table_is_empty(void) {
+    DIR *directory = opendir("/proc/self/fd");
+    struct dirent *entry;
+    int own_descriptor;
+    if (directory == NULL) {
+        return false;
+    }
+    own_descriptor = dirfd(directory);
+    for (;;) {
+        char *end = NULL;
+        long descriptor;
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                (void)closedir(directory);
+                return false;
+            }
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        errno = 0;
+        descriptor = strtol(entry->d_name, &end, 10);
+        if (errno != 0 || end == entry->d_name || *end != '\0' || descriptor < 0L ||
+            descriptor > INT_MAX || (int)descriptor != own_descriptor) {
+            (void)closedir(directory);
+            return false;
+        }
+    }
+    return closedir(directory) == 0;
+}
+
+static bool set_exact_resource_limit(int resource, rlim_t value) {
+    struct rlimit requested = {.rlim_cur = value, .rlim_max = value};
+    struct rlimit observed;
+    return setrlimit(resource, &requested) == 0 && getrlimit(resource, &observed) == 0 &&
+           observed.rlim_cur == value && observed.rlim_max == value;
+}
+
+static bool configure_worker_resource_limits(void) {
+    return set_exact_resource_limit(RLIMIT_NOFILE, (rlim_t)WORKER_NOFILE_LIMIT) &&
+           set_exact_resource_limit(RLIMIT_FSIZE, (rlim_t)WORKER_FILE_LIMIT_BYTES) &&
+           set_exact_resource_limit(RLIMIT_CORE, (rlim_t)0U) &&
+           set_exact_resource_limit(RLIMIT_CPU, (rlim_t)WORKER_CPU_LIMIT_SECONDS);
+}
+
+static bool arm_worker_wall_timer(void) {
+    struct sigaction action;
+    struct itimerval timer;
+    sigset_t unblocked;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    if (sigemptyset(&action.sa_mask) != 0 || sigaction(SIGALRM, &action, NULL) != 0 ||
+        sigemptyset(&unblocked) != 0 || sigaddset(&unblocked, SIGALRM) != 0 ||
+        sigprocmask(SIG_UNBLOCK, &unblocked, NULL) != 0) {
+        return false;
+    }
+    memset(&timer, 0, sizeof(timer));
+    timer.it_value.tv_sec = (time_t)WORKER_WALL_LIMIT_SECONDS;
+    return setitimer(ITIMER_REAL, &timer, NULL) == 0;
+}
 
 static bool write_all(int fd, const void *buffer, size_t length) {
     const uint8_t *bytes = buffer;
@@ -175,11 +274,178 @@ static bool cmdline_devices_are_exact(void) {
     return request_count == 1U && scratch_count == 1U;
 }
 
-static bool required_devices_are_block_special_files(void) {
-    struct stat request_device;
+static bool block_device_inventory_is_exact(void) {
+    DIR *directory = opendir("/sys/class/block");
+    struct dirent *entry;
+    bool root_seen = false;
+    bool scratch_seen = false;
+    bool request_seen = false;
+    if (directory == NULL) {
+        return false;
+    }
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                (void)closedir(directory);
+                return false;
+            }
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        if (strcmp(entry->d_name, "vda") == 0 && !root_seen) {
+            root_seen = true;
+        } else if (strcmp(entry->d_name, "vdb") == 0 && !scratch_seen) {
+            scratch_seen = true;
+        } else if (strcmp(entry->d_name, "vdc") == 0 && !request_seen) {
+            request_seen = true;
+        } else {
+            (void)closedir(directory);
+            return false;
+        }
+    }
+    return closedir(directory) == 0 && root_seen && scratch_seen && request_seen;
+}
+
+static bool inspect_block_device(
+    const char *path,
+    bool expected_read_only,
+    struct stat *identity
+) {
+    int descriptor;
+    int read_only = -1;
+    struct stat before;
+    struct stat after;
+    bool ok;
+    if (lstat(path, &before) != 0 || !S_ISBLK(before.st_mode) || before.st_nlink != 1) {
+        return false;
+    }
+    descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (descriptor < 0) {
+        return false;
+    }
+    ok = fstat(descriptor, &after) == 0 && after.st_dev == before.st_dev &&
+         after.st_ino == before.st_ino && after.st_rdev == before.st_rdev &&
+         S_ISBLK(after.st_mode) && ioctl(descriptor, BLKROGET, &read_only) == 0 &&
+         (read_only != 0) == expected_read_only;
+    if (close(descriptor) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        return false;
+    }
+    *identity = after;
+    return true;
+}
+
+static bool device_node_policy_is_exact(
+    const char *path,
+    uid_t expected_uid,
+    gid_t expected_gid,
+    mode_t expected_mode,
+    dev_t expected_device
+) {
+    struct stat status;
+    return lstat(path, &status) == 0 && S_ISBLK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == expected_uid && status.st_gid == expected_gid &&
+           (status.st_mode & 07777) == expected_mode && status.st_rdev == expected_device;
+}
+
+static bool limited_device_node_inventory_is_exact(void) {
+    DIR *directory = opendir("/dev");
+    struct dirent *entry;
+    bool scratch_seen = false;
+    bool request_seen = false;
+    if (directory == NULL) {
+        return false;
+    }
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                (void)closedir(directory);
+                return false;
+            }
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        if (strcmp(entry->d_name, "vdb") == 0 && !scratch_seen) {
+            scratch_seen = true;
+        } else if (strcmp(entry->d_name, "vdc") == 0 && !request_seen) {
+            request_seen = true;
+        } else {
+            (void)closedir(directory);
+            return false;
+        }
+    }
+    return closedir(directory) == 0 && scratch_seen && request_seen;
+}
+
+static bool make_limited_block_node(
+    const char *path,
+    dev_t device,
+    mode_t mode,
+    uid_t owner,
+    gid_t group
+) {
+    return mknod(path, (mode_t)(S_IFBLK | mode), device) == 0 &&
+           chown(path, owner, group) == 0 && chmod(path, mode) == 0 &&
+           device_node_policy_is_exact(path, owner, group, mode, device);
+}
+
+static bool required_devices_are_exact_and_minimal(void) {
+    struct stat root_device;
     struct stat scratch_device;
-    return lstat("/dev/vdc", &request_device) == 0 && S_ISBLK(request_device.st_mode) &&
-           lstat("/dev/vdb", &scratch_device) == 0 && S_ISBLK(scratch_device.st_mode);
+    struct stat request_device;
+    struct stat limited_scratch;
+    struct stat limited_request;
+    if (!block_device_inventory_is_exact() ||
+        !inspect_block_device("/dev/vda", true, &root_device) ||
+        !inspect_block_device("/dev/vdb", false, &scratch_device) ||
+        !inspect_block_device("/dev/vdc", true, &request_device) ||
+        root_device.st_rdev == scratch_device.st_rdev ||
+        root_device.st_rdev == request_device.st_rdev ||
+        scratch_device.st_rdev == request_device.st_rdev) {
+        return false;
+    }
+    /* Hide the broad devtmpfs mount beneath a tiny tmpfs. MS_NODEV is
+     * deliberately absent because the only two visible entries are the
+     * validated request and scratch block nodes created below. The root node
+     * and every character device remain unreachable after capability drop. */
+    if (mount(
+            "tmpfs",
+            "/dev",
+            "tmpfs",
+            MS_NOSUID | MS_NOEXEC,
+            "mode=0755,size=64k,nr_inodes=8"
+        ) != 0 ||
+        !make_limited_block_node(
+            "/dev/vdb",
+            scratch_device.st_rdev,
+            0600,
+            (uid_t)WORKER_UID,
+            (gid_t)WORKER_GID
+        ) ||
+        !make_limited_block_node(
+            "/dev/vdc",
+            request_device.st_rdev,
+            0400,
+            (uid_t)WORKER_UID,
+            (gid_t)WORKER_GID
+        ) ||
+        !limited_device_node_inventory_is_exact() ||
+        !inspect_block_device("/dev/vdb", false, &limited_scratch) ||
+        !inspect_block_device("/dev/vdc", true, &limited_request)) {
+        return false;
+    }
+    return limited_scratch.st_rdev == scratch_device.st_rdev &&
+           limited_request.st_rdev == request_device.st_rdev;
 }
 
 static bool drop_capability_bounding_set_while_privileged(void) {
@@ -275,9 +541,16 @@ static bool landlock_restrict_worker(void) {
                             LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
                             LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK |
                             LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
-                            LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER;
+                            LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER |
+                            LANDLOCK_ACCESS_FS_TRUNCATE;
     struct landlock_ruleset_attr ruleset_attr = {.handled_access_fs = access};
-    const int ruleset_fd =
+    const int abi =
+        (int)syscall(SYS_landlock_create_ruleset, NULL, 0U, LANDLOCK_CREATE_RULESET_VERSION);
+    int ruleset_fd;
+    if (abi < 3) {
+        return false;
+    }
+    ruleset_fd =
         (int)syscall(SYS_landlock_create_ruleset, &ruleset_attr, sizeof(ruleset_attr), 0);
     if (ruleset_fd < 0) {
         return false;
@@ -290,13 +563,16 @@ static bool landlock_restrict_worker(void) {
 }
 
 static int rejection_only_worker(void) {
-    if (!place_self_in_cgroup() || !drop_capability_bounding_set_while_privileged() ||
+    if (!descriptor_table_is_empty() || !configure_worker_resource_limits() ||
+        !arm_worker_wall_timer() || !place_self_in_cgroup() ||
+        !drop_capability_bounding_set_while_privileged() ||
         setgroups(0U, NULL) != 0 || setgid((gid_t)WORKER_GID) != 0 ||
         setuid((uid_t)WORKER_UID) != 0 || !worker_identity_and_capabilities_are_safe() ||
         !install_network_denial_seccomp() || !landlock_restrict_worker()) {
         return 2;
     }
-    /* There is intentionally no LFRQ parser and no LFRS writer here. */
+    /* The production worker deliberately invokes neither the compiled LFRQ
+     * interpreter nor an LFRS completion writer. */
     return 1;
 }
 
@@ -311,9 +587,13 @@ static void power_off(void) {
 int main(void) {
     pid_t worker;
     int status = 0;
-    if (getpid() != 1 || !mount_boundary_filesystems() || !configure_cgroup() ||
-        !cmdline_devices_are_exact() || !required_devices_are_block_special_files()) {
+    if (getpid() != 1 || !close_all_inherited_descriptors() || !mount_boundary_filesystems() ||
+        !descriptor_table_is_empty() || !configure_cgroup() || !cmdline_devices_are_exact() ||
+        !required_devices_are_exact_and_minimal()) {
         power_off();
+    }
+    if (false) {
+        (void)leftovers_guest_interpret(-1, -1, -1);
     }
     worker = fork();
     if (worker == 0) {

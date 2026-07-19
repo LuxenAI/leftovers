@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA_PATH = ROOT / "schemas" / "strict-vm-manifest.schema.json"
 RECEIPT_SCHEMA_PATH = ROOT / "schemas" / "strict-vm-receipt.schema.json"
+REQUEST_SCHEMA_PATH = ROOT / "schemas" / "strict-vm-request.schema.json"
 EVIDENCE_PATH = ROOT / "vm" / "evidence" / "2026-07-18-live-smoke.json"
 JSONSCHEMA_AVAILABLE = importlib.util.find_spec("jsonschema") is not None
 
@@ -99,6 +100,13 @@ def valid_manifest() -> dict[str, object]:
 
 
 class StrictVMReceiptSchemaSourceTests(unittest.TestCase):
+    def test_request_schema_uses_the_exact_bounded_wire_section_name(self) -> None:
+        schema = json.loads(REQUEST_SCHEMA_PATH.read_text(encoding="utf-8"))
+        section_properties = schema["properties"]["sections"]["properties"]
+        self.assertIn("prior_obs", section_properties)
+        self.assertNotIn("prior_observations", section_properties)
+        self.assertTrue(all(len(name.encode("ascii")) <= 16 for name in section_properties))
+
     def test_manifest_schema_is_exact_v2(self) -> None:
         schema = json.loads(MANIFEST_SCHEMA_PATH.read_text(encoding="utf-8"))
         self.assertEqual(schema["properties"]["schema_version"], {"const": 2})

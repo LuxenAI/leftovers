@@ -5,8 +5,9 @@ subscription provider. It is not the older `scripts/codex_adapter.py` host-previ
 does not enable `leftovers run --execute`.
 
 The contemplated provider identity is exact: `openai-codex-cli`, `gpt-5.6-terra`, and `high`.
-The controller would pin an absolute executable path, immutable SHA-256, and exact version; it
-would invoke an empty private working directory with an empty/minimal environment, no inherited
+The controller would pin an absolute executable path, expected SHA-256, and an asserted exact
+version label; live activation must independently prove the code-signature/dependency identity. It
+would invoke an empty private working directory with an empty environment, no inherited
 configuration/rules, no extra host directories, a new session, a monotonic deadline, bounded
 stdin/stdout/stderr/events, and process-group termination proof. The fixed argv is deliberately
 not configurable. Repository text and prompts remain untrusted input data.
@@ -19,6 +20,47 @@ assumed to retain an authenticated subscription. `PRODUCTION_CODEX_MEDIATION_ENA
 `ZERO_TOOL_CONFIGURATION_PROVEN` are both compile-time `False`, and `mediate()` rejects before it
 creates a ledger, temporary directory, subprocess, environment, or credential lookup. Do not flip
 either value in a deployment configuration.
+
+`verify_codex_cli_identity()` and `prepare_codex_invocation_plan()` now implement the
+**non-executing** portion of this contract. The executable and output schema are opened with
+`O_NOFOLLOW | O_NONBLOCK`, streamed through bounded SHA-256 calculations (rather than copied into
+memory), and bound to stable device/inode/owner/mode/size/time metadata. Hard links, symlinks, writable
+ancestors, mutable modes, wrong digests, special-file substitution, and replacement between
+verification passes are rejected.
+The invocation directory must already be an exact owner-only `0700` directory with trusted
+ancestors and no entries; the only result name is `result.json`. The resulting plan has an empty
+environment, fixed argv, bounded event/diagnostic limits, stdin prompt digest, schema digest,
+deadline, complete validated file/directory metadata, request/limit binding, and an attestation
+digest. It contains no provider credential and does not start a process. Empty environment is not
+credential isolation: a future same-UID process could still resolve its account home, read other
+host files, or contact Keychain/login services, so a dedicated service identity and OS capability
+boundary remain mandatory.
+
+The untrusted request JSON is length-and-digest-bound, then base64 encoded so request strings cannot
+spoof the trusted framing delimiters. Before a plan is returned, a deliberately conservative
+one-token-per-framed-byte estimate plus a 16,384-token provider-context reserve must fit the input
+cap, and that estimate plus the full output cap must fit the total reservation. The reserve is
+based on the observed CLI overhead with safety margin; it is an admission backstop, not a supported
+provider quota API or proof that a future CLI version cannot add more context. A pinned tokenizer
+and renewed version-specific evidence remain activation requirements. Codex-specific request bytes
+are additionally capped at 1,500,000 so base64 expansion plus trusted framing always fits the
+2,100,000-byte provider-prompt cap; the shared mediator's larger generic input ceiling does not
+silently become a non-composable Codex limit.
+
+This is still not a descriptor-to-exec authority. A future dedicated broker must revalidate the
+same executable identity immediately before a descriptor-safe spawn, hold the private directory
+by descriptor, capture output without unbounded buffering, enforce termination, and durably bind
+the observation to its reply. `revalidate_codex_invocation_plan()` currently rebuilds and compares
+the executable, schema, private-directory, argv, prompt, request, token, and deadline bindings,
+including schema device/inode/owner/mode/size/time metadata. The plan attestation independently
+hashes its actual argv, environment, stdin bytes, executable path, cwd, schema path, and result path
+as well as the declared verification fields, so replacing a stored launch field changes the digest.
+That detects stale-plan reuse but is still path-based and cannot replace a descriptor-safe spawn
+critical section. The current Codex app
+installation under `/Applications` is also ineligible for this high-assurance path because
+`/Applications` is group-writable on this host; activation would require a separately provisioned,
+root-owned immutable CLI location or an equivalently reviewed platform code-signature policy. No
+installer performs that provisioning.
 
 ## Data contract prepared for a future reviewed broker
 

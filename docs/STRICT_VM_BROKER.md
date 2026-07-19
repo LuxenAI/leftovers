@@ -1,9 +1,15 @@
 # Dedicated strict-VM broker (unimplemented release gate)
 
 `leftovers.strict_vm_broker` defines a narrow, **hard-disabled** protocol for the missing host
-trust boundary between a controller account and the immutable strict-VM launcher. It does not bind
-a socket, create a run directory, write a request, invoke the launcher, install a service, or
-change any host permissions.
+trust boundary between a controller account and the immutable strict-VM launcher.
+`leftovers.strict_vm_broker_service` now makes parts of the future service boundary executable only
+through explicitly fixture-named APIs and an issued `FixtureBrokerServiceCapability`:
+descriptor-relative request storage, bounded one-frame Unix-socket I/O, a Darwin
+peer/signature-verification interface, fixed resource policy, and exact run cleanup. The public
+production `StrictVMBrokerServiceCore` constructor, dispatcher, and launcher-plan method all check
+the source gates before inspecting a peer, dependency, descriptor, or durable state, then remain
+unimplemented. The module does not bind a socket, create a run directory in production, invoke the
+launcher, install a service, or change any host permissions.
 
 The need is specific: a controller-owned `0700` directory is not enough when the controller and
 an attacker can run as the same macOS UID. The attacker can race an apparently sealed request or
@@ -15,6 +21,13 @@ admit only a separately approved controller UID through Darwin `getpeereid` cred
 That is intentional: the dedicated broker removes their ability to replace broker-owned filesystem
 paths, while the still-missing controller authorization receipt must bind any accepted request to the
 mediator's allowed actions and checks. The protocol alone is not authorization to run arbitrary input.
+
+The new code-signature interface makes that remaining gap explicit. A production Darwin verifier
+must obtain the connected peer's audit-token/process identity, verify its Security.framework
+designated requirement, and bind it to an installed Team ID plus requirement digest. It must do so
+before reading controller-provided frame bytes. The current Python code provides no implementation
+of that verifier and does not treat a boolean, UID, executable path, or controller-supplied hash as
+such evidence.
 
 ## Prepared protocol, not an execution interface
 
@@ -35,7 +48,8 @@ frame, and concatenated/truncated frame all fail closed.
 
 The broker installation itself contains the immutable launcher and boot identity. A future service
 must build its own manifest using descriptor-relative creation in a broker-owned run directory,
-rehash its immutable launch/boot artifacts, and invoke only:
+rehash its immutable launch/boot artifacts through pre-opened descriptors (with immutable owner,
+single-link identity, `FD_CLOEXEC`, and no writable mode bits), and invoke only:
 
 ```text
 <installed strict-vm-launcher> --run <broker-generated manifest path>
@@ -44,6 +58,30 @@ rehash its immutable launch/boot artifacts, and invoke only:
 That argv is intentionally unavailable from the scaffold. The controller cannot ask the broker to
 run an arbitrary executable or path.
 
+Fixture-only `FixturePrivateRunRoot` accepts only a broker-owned `runs` directory descriptor whose
+owner and exact `0700` mode are checked. It creates the broker-generated `run_id` child using
+`mkdirat`, opens it with `O_NOFOLLOW`, and writes only `request.lfrq` with
+`O_CREAT|O_EXCL|O_NOFOLLOW`, exact `0600` mode, digest binding, and `fsync`. Cleanup records the
+created directory's device/inode, reopens the name relative to the private root, and compares both
+the reopened and held descriptor identities before unlinking or removing anything. A rename plus
+same-name replacement present at either identity check fails closed without touching either request
+tree. Portable POSIX `rmdir` remains a name operation: a hostile same-UID process can still race a
+replacement after the final check. The fixture is therefore not cleanup authority; production
+requires a distinct-UID, exclusive broker-owned root. Cleanup never recurses or sweeps a
+controller-named path. These primitives are unavailable without the fixture capability and are not
+wired to a listener while the release gates are false.
+
+The fixture dispatcher reads one bounded canonical frame, asks Darwin `getpeereid`, verifies the
+installed controller signature binding, then parses the frame. It performs no inherited-environment
+forwarding and its launcher-plan fixture has fixed memory, vCPU, request, scratch, and wall-clock
+limits. Cancellation during a partial frame yields no reply. It also requires a broker-private
+`DurableBrokerAcknowledgement` transaction to persist the request/reply binding and its root-owned
+journal witness before sending any reply; a failed witness produces no acknowledgement. That
+interface is deliberately not a live journal/service implementation. Production does not fall
+through to this fixture dispatcher. All four source gates remain false:
+`STRICT_VM_BROKER_SERVICE_ENABLED`, dedicated-UID evidence, code-signature evidence, and live
+cleanup evidence.
+
 ## Activation blockers
 
 `STRICT_VM_BROKER_ENABLED` is a source-level `False`, and `StrictVMBrokerService.start()` fails
@@ -51,7 +89,8 @@ before a socket or directory is created. Do not enable it from configuration. Se
 first provide all of the following:
 
 - a signed, root-owned launchd installation and a dedicated non-controller broker UID;
-- a socket permission/ACL design and live `getpeereid` tests, including same-UID race attempts;
+- a socket permission/ACL design, a Security.framework audit-token/designated-requirement verifier,
+  and live `getpeereid` tests, including same-UID race attempts;
 - descriptor-relative, no-follow request/manifest/scratch creation plus exact cleanup/recovery;
 - immutable boot-artifact provenance and rehashing immediately before launcher use;
 - mediation-receipt binding to the accepted request and independently verified post-stop result;
@@ -97,5 +136,6 @@ legitimate controller from a malicious process running under the same approved c
 Production therefore also needs an unforgeable mediator/broker capability or a code-signature-bound
 IPC design; caller-constructed hashes are not authorization.
 
-This removes a same-UID pathname race from the future design; it does not make Virtualization.framework
-or any host absolutely escape-proof.
+Descriptor retention narrows pathname races but cannot remove the final same-UID name-removal race
+inside this fixture. The future distinct-UID/exclusive-root service boundary is mandatory, and even
+that does not make Virtualization.framework or any host absolutely escape-proof.

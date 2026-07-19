@@ -520,10 +520,13 @@ class VMBundleTests(unittest.TestCase):
             source_capsule=self.source,
             task={"issue": 42},
             authorization=authorization,
+            prior_observations={"note": "bounded fixture observation"},
         )
         mediation = parsed.sections["mediation"]
         assert isinstance(mediation, dict)
         self.assertEqual(mediation["action_batch_sha256"], result.receipt.action_batch_sha256)
+        self.assertEqual(parsed.sections["prior_obs"], {"note": "bounded fixture observation"})
+        self.assertNotIn("prior_observations", parsed.sections)
         with self.assertRaisesRegex(bundle.BundleError, "broker attestation"):
             bundle.authorize_mediation_result(
                 request,

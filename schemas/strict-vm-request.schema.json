@@ -33,7 +33,9 @@
           "description": "Bounded UTF-8 patch byte section whose SHA-256 must match apply_patch."
         },
         "action_batch": {"$ref": "strict-vm-action-batch.schema.json"},
-        "prior_observations": {}
+        "prior_obs": {
+          "description": "Bounded prior-observation JSON; shortened to fit the 16-byte LFRQ wire field."
+        }
       }
     }
   },

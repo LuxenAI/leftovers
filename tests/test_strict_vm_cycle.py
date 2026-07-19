@@ -86,6 +86,7 @@ def host(**changes: object) -> IndependentHostReceipt:
         "run_id": RUN_ID,
         "base_sha_observed": BASE,
         "applied_patch_sha256": PATCH_SHA,
+        "inspected_patch_sha256": PATCH_SHA,
         "inspected_diff_sha256": PATCH_SHA,
         "policy_sha256": POLICY,
         "policy_allowed": True,
@@ -161,7 +162,7 @@ class StrictVMCycleTests(unittest.TestCase):
 
     def test_independent_diff_policy_and_check_failures_are_rejected(self) -> None:
         bad_cases = (
-            (host(inspected_diff_sha256="a" * 64), "inspected diff"),
+            (host(inspected_patch_sha256="a" * 64), "inspected patch"),
             (host(policy_allowed=False), "policy"),
             (host(review_unresolved=True), "unresolved"),
             (

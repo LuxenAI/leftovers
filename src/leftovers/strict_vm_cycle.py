@@ -213,6 +213,7 @@ class IndependentHostReceipt:
     run_id: str
     base_sha_observed: str
     applied_patch_sha256: str
+    inspected_patch_sha256: str
     inspected_diff_sha256: str
     policy_sha256: str
     policy_allowed: bool
@@ -224,6 +225,7 @@ class IndependentHostReceipt:
         for value, label, pattern in (
             (self.base_sha_observed, "observed base SHA", _GIT_SHA),
             (self.applied_patch_sha256, "applied patch digest", _HEX64),
+            (self.inspected_patch_sha256, "inspected patch digest", _HEX64),
             (self.inspected_diff_sha256, "inspected diff digest", _HEX64),
             (self.policy_sha256, "host policy digest", _HEX64),
         ):
@@ -412,8 +414,8 @@ def create_fixture_publisher_handoff(
         raise StrictVMCycleError("base moved before publisher handoff")
     if host.applied_patch_sha256 != state.patch_sha256:
         raise StrictVMCycleError("host-applied patch drifted from the guest canonical patch")
-    if host.inspected_diff_sha256 != state.patch_sha256:
-        raise StrictVMCycleError("independently inspected diff does not match the canonical patch")
+    if host.inspected_patch_sha256 != state.patch_sha256:
+        raise StrictVMCycleError("independently inspected patch does not match the canonical patch")
     if host.policy_sha256 != state.plan.policy_sha256 or not host.policy_allowed:
         raise StrictVMCycleError("independent policy re-verification did not pass")
     if host.review_unresolved:

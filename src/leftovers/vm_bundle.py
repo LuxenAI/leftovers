@@ -65,7 +65,7 @@ REQUEST_SECTION_TYPES = frozenset(
         "cumulative_patch",
         "proposed_patch",
         "action_batch",
-        "prior_observations",
+        "prior_obs",
     }
 )
 REQUIRED_REQUEST_SECTION_TYPES = frozenset(
@@ -90,7 +90,7 @@ REQUEST_JSON_CAPS = {
     "check_registry": 64 * 1_024,
     "mediation": 64 * 1_024,
     "action_batch": 256 * 1_024,
-    "prior_observations": 128 * 1_024,
+    "prior_obs": 128 * 1_024,
 }
 REQUEST_RAW_CAPS = {
     "source_capsule": 128 * 1_024 * 1_024,
@@ -685,7 +685,7 @@ def build_authorized_request_bundle(
     if cumulative_patch is not None:
         sections["cumulative_patch"] = cumulative_patch
     if prior_observations is not None:
-        sections["prior_observations"] = dict(prior_observations)
+        sections["prior_obs"] = dict(prior_observations)
     return build_request_bundle(
         path,
         run_id=run_id,

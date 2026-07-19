@@ -14,8 +14,8 @@ The future boot chain is deliberately split:
 immutable Buildroot + Linux source pins
   -> reviewed aarch64 kernel + read-only root.ext2 + initramfs
   -> minimal early PID 1, read-only vda mount, and pivot into root.ext2
-  -> rejection-only PID 1 supervisor (this tree)
-  -> non-root worker with no request parser or result writer
+  -> fail-closed PID 1 supervisor (this tree)
+  -> source-only, release-disabled bounded action interpreter
 ```
 
 The launcher must attach the root image read-only, have no NIC, share, socket, or interactive device,
@@ -28,8 +28,14 @@ never infers a device order.
 There is no host filesystem mount, host process launcher, credential, broker socket, network client,
 shell, package manager, archive extractor, arbitrary argv field, or model provider in this guest.
 The request and scratch block devices are the only proposed data channels. A future mediator remains
-outside the VM and must never give the guest its credentials. This scaffold opens neither device and
-does not parse a request or emit a result.
+outside the VM and must never give the guest its credentials. The interpreter source opens only those
+descriptors and a pre-prepared scratch repository directory descriptor; it never opens a host path,
+looks up credentials, consults an environment variable, or accepts an argv. It is compiled but its
+call site is statically unreachable in the release guest. No built image has exercised it.
+The source parser accepts either a regular test fixture or the real read-only block request, deriving
+the latter's exact extent with `BLKGETSIZE64` and independently requiring `BLKROGET`. The unactivated
+wire name for the public `prior_observations` API argument is the bounded 9-byte `prior_obs`; every
+section name fits the fixed 16-byte table field, including exact-width `cumulative_patch`.
 
 ## Reproducible inputs
 
@@ -130,24 +136,58 @@ after the read-only root pivot. The supervisor receives no arguments. Before for
 verifies the root is read-only; mounts guest-only `proc`, `sysfs`, `devtmpfs`, cgroup v2, and bounded
 `tmpfs` volumes; enables `cpu`, `memory`, and `pids` in the parent cgroup; writes and re-reads
 `memory.max=384 MiB`, `memory.swap.max=0`, `pids.max=64`, and `cpu.max=50000 100000`; and requires
-the exact raw-device arguments above.
+the exact raw-device arguments above. It first closes every inherited descriptor with `close_range`
+and audits `/proc/self/fd`. It validates exactly the `vda`, `vdb`, and `vdc` kernel block inventory,
+verifies root and request are kernel-reported read-only while scratch is writable, and rejects
+aliased device identities. It then hides devtmpfs beneath a 64 KiB `nosuid,noexec` tmpfs, recreates
+only mode-0600 `vdb` and mode-0400 `vdc` for UID/GID 65534, and rechecks both device identities,
+read-only states, modes, owners, and the exact two-entry `/dev` inventory. The root node and every
+character device are absent from the worker-visible mount.
 
 The worker is moved into that cgroup while privileged, drops its capability bounding set, clears
 keep-caps, calls `setgroups`, sets UID/GID 65534, verifies all effective/permitted/inheritable/bounding
 capability sets are zero, then sets `no_new_privs`, applies a Landlock ruleset with no filesystem path
-whitelist, and installs a seccomp filter denying network syscall entry points. The kernel config
+whitelist, and installs a seccomp filter denying network syscall entry points. Before that drop it
+sets and reads back exact `RLIMIT_NOFILE`, `RLIMIT_FSIZE`, `RLIMIT_CORE`, and `RLIMIT_CPU` values and
+arms a non-repeating wall timer with the default fatal `SIGALRM` disposition. Landlock ABI 3 or newer
+is required and `LANDLOCK_ACCESS_FS_TRUNCATE` is handled explicitly. The kernel config
 independently removes the network stack, module loading, user/PID/network namespaces, BPF syscall,
 core dumps, and kexec. These controls are defense in depth; they are not a claim of escape-proofing.
 
 The controller's only wire format is implemented in
 [`src/leftovers/vm_bundle.py`](../../src/leftovers/vm_bundle.py): a sealed 4,096-byte request header
-and a fixed tail-region result footer. This scaffold deliberately implements neither parser nor
-writer. It leaves scratch without a host-acceptable footer, so bounded host extraction rejects it.
-There is no archive extractor, path resolver, shell, Python runtime, package manager, fixed check
-registry, or executable action interpreter. A future implementation must use the controller format
-unchanged, fuzz its total parser, use descriptor-relative `openat2` with
-`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS`, reject hard links/devices/symlinks and
-path traversal, and execute only controller-owned fixed argv arrays.
+and a fixed tail-region result footer. `guest_interpreter.c` independently checks the bounded LFRQ
+header/table, byte caps, alignment, zero padding, whole-payload and per-section SHA-256 values,
+required section names, and an independent exact action-batch parser before it considers an action.
+That parser accepts only the canonical sorted top-level schema bound to the fixed provider, Terra
+model, high effort, LFRQ run/round/stage, and one to 32 actions. Each action has an exact sorted field
+set; duplicate/unknown/reordered keys, duplicate IDs/checks, escaped authority strings, escaped
+Unicode spellings, malformed or overlong UTF-8, stage-inappropriate actions, unknown checks, and
+patch-digest substitution fail. The non-authoritative finish summary accepts only strict
+shortest-form raw UTF-8 plus canonical quote/backslash escapes, matching the host's
+`canonical_json_bytes` output (which uses `ensure_ascii=False`); authority fields remain unescaped
+ASCII. Host validation additionally requires NFC before sealing; summary text carries no guest
+authority.
+The exact descriptor, block, and repository inventory scans also distinguish clean `readdir` EOF
+from an I/O error; incomplete enumeration is rejection, never an exact-inventory receipt.
+Quoted summary text can never be reinterpreted as an action. The interpreter uses
+descriptor-relative `openat2` with
+`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV`, rejects absolute/dot
+paths, symlinks, hard-linked regular files, devices, FIFOs, sockets, over-large files, excessive
+file counts, repository trees deeper than 32 directories, and excessive repository bytes. It has no
+shell, PATH lookup, archive extractor, network API, credential lookup, or model client.
+
+The only candidate action types are one controller-digest-bound patch and the two in-process fixed
+checks `repo-tree-safety-v1` and `repo-root-regular-v1`; no action contains or selects a command
+string. The current controller still emits unified-diff patch bytes while the guest source reserves
+a replacement-only `LPATCH/1` record. Consequently patch application fails closed and no edit can
+occur. The footer writer similarly emits only a bounded diagnostic LFRS header with no completion
+marker, so host extraction rejects it. Host tests compile and execute the pure parser against quoted
+action substrings, duplicate/unknown/reordered fields, Unicode escapes, excessive action counts,
+unknown checks, and digest substitution; this is not guest-runtime proof. Activating writes requires
+one reviewed scratch-image layout, a complete shared patch grammar, a semantic five-section LFRS
+writer, parser fuzzing, and live VM evidence. The source is a hardening component, not evidence that
+the guest can safely execute work.
 
 Linux documents that `no_new_privs` prevents `execve` privilege gain, Landlock restricts filesystem
 access for unprivileged processes, and cgroup v2 provides hierarchical resource controllers.  See
@@ -171,11 +211,16 @@ Before enabling the strict runner, all of the following must be complete and ind
    the launcher manifest.
 2. Build and boot-test the early-init vda pivot plus exact vdb/vdc device contract against the current
    launcher, including absent-request failure and duplicate-argument rejection.
-3. Implement and fuzz the existing 4 KiB-header/tail-footer parser plus bounded, descriptor-only
-   result extraction; prove malformed headers, partial writes, stale scratch disks, and duplicate
-   records fail closed.
-4. Add a narrow action interpreter, safe archive/path handling, and controller-owned fixed checks;
-   then test every allowed action in a disposable VM.
+3. Fuzz and live-test the existing 4 KiB request-header parser, then implement the semantic
+   tail-footer parser plus bounded, descriptor-only result extraction; prove malformed headers,
+   partial writes, stale scratch disks, and duplicate records fail closed.
+4. Complete the shared replacement-patch grammar and semantic LFRS writer, then test every allowed
+   action in a disposable VM. The checked-in interpreter is source-only and remains disabled.
+   Activation must also pre-open and bind the three intended descriptors before installing a
+   reviewed Landlock policy; the current no-rule policy and empty descriptor table intentionally
+   make the source-only interpreter unusable. The guest must validate or cryptographically bind the
+   request-specific policy, check registry, mediation receipt, action cap, and check allowlist rather
+   than relying only on its hard-coded global bounds.
 5. Run live escape, network, cgroup exhaustion, fork bomb, file/inode, symlink, archive, timeout,
    crash/restart, and cleanup adversarial tests on the exact signed artifacts.
 6. Integrate the credential-isolating model mediator and whole-cycle result verifier without exposing
