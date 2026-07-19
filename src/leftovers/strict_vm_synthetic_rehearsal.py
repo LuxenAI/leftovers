@@ -221,6 +221,17 @@ def _read_bounded_regular(path: Path, *, label: str, maximum_bytes: int) -> byte
             os.close(descriptor)
 
 
+def _trusted_fixture_parent(info: os.stat_result) -> bool:
+    """Recognize a controlled parent or the root-owned sticky temp boundary."""
+
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.geteuid()}:
+        return False
+    if not mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return True
+    return info.st_uid == 0 and bool(mode & stat.S_ISVTX)
+
+
 def _open_private_empty_directory(path: Path, label: str) -> _RootRecord:
     """Open and retain the caller-owned fixture root after exact validation."""
 
@@ -238,11 +249,7 @@ def _open_private_empty_directory(path: Path, label: str) -> _RootRecord:
         or stat.S_IMODE(named.st_mode) != 0o700
     ):
         raise SyntheticRehearsalError(f"{label} must be an owner-private real directory")
-    if (
-        not stat.S_ISDIR(parent_named.st_mode)
-        or parent_named.st_uid not in {0, os.geteuid()}
-        or parent_named.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    ):
+    if not _trusted_fixture_parent(parent_named):
         raise SyntheticRehearsalError(f"{label} parent is not trusted")
     try:
         parent_descriptor = os.open(

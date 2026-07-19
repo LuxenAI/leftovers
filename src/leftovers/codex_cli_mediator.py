@@ -358,8 +358,23 @@ def _controller_path(path: Path, name: str) -> str:
     return text
 
 
+def _trusted_ancestor_directory(info: os.stat_result) -> bool:
+    """Accept controlled directories and the root-owned sticky temp boundary."""
+
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.geteuid()}:
+        return False
+    if not mode & 0o022:
+        return True
+    # A root-owned sticky directory such as Linux /tmp prevents an
+    # unprivileged different UID from replacing another user's child.  This
+    # does not address a same-UID attacker; production still requires the
+    # documented dedicated service identity and private invocation root.
+    return info.st_uid == 0 and bool(mode & stat.S_ISVTX)
+
+
 def _trusted_parent_chain(path: Path, name: str) -> None:
-    """Require a canonical owner/root-controlled path with no writable ancestor."""
+    """Require a canonical path beneath controlled or root-sticky ancestors."""
 
     try:
         resolved = path.resolve(strict=True)
@@ -367,19 +382,13 @@ def _trusted_parent_chain(path: Path, name: str) -> None:
         raise CodexMediatorError(f"{name} does not exist") from exc
     if resolved != path:
         raise CodexMediatorError(f"{name} path contains a symlink or non-canonical component")
-    allowed_owners = {0, os.geteuid()}
     current = path.parent
     while True:
         try:
             info = current.lstat()
         except OSError as exc:
             raise CodexMediatorError(f"{name} ancestor cannot be inspected") from exc
-        if (
-            current.is_symlink()
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid not in allowed_owners
-            or stat.S_IMODE(info.st_mode) & 0o022
-        ):
+        if current.is_symlink() or not _trusted_ancestor_directory(info):
             raise CodexMediatorError(f"{name} has an untrusted writable ancestor")
         if current.parent == current:
             break

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import unittest
 from dataclasses import replace
@@ -11,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from leftovers import codex_cli_mediator as codex_mediator
 from leftovers.codex_cli_mediator import (
     DISABLED_MODEL_FEATURES,
     MODEL,
@@ -570,6 +572,16 @@ class CodexInvocationPlanTests(unittest.TestCase):
                     self.identity.version,
                 )
             )
+
+    def test_ancestor_policy_allows_only_root_owned_sticky_writable_directories(self) -> None:
+        root_sticky = mock.Mock(st_mode=stat.S_IFDIR | 0o1777, st_uid=0)
+        root_nonsticky = mock.Mock(st_mode=stat.S_IFDIR | 0o0777, st_uid=0)
+        user_sticky = mock.Mock(st_mode=stat.S_IFDIR | 0o1777, st_uid=os.geteuid())
+
+        self.assertTrue(codex_mediator._trusted_ancestor_directory(root_sticky))
+        self.assertFalse(codex_mediator._trusted_ancestor_directory(root_nonsticky))
+        if os.geteuid() != 0:
+            self.assertFalse(codex_mediator._trusted_ancestor_directory(user_sticky))
 
     def test_cli_identity_revalidation_rejects_replacement(self) -> None:
         verified = verify_codex_cli_identity(self.identity)

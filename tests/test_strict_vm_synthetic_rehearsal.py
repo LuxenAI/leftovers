@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -27,6 +28,18 @@ NOW = datetime.now(UTC)
 
 
 class StrictVMSyntheticRehearsalTests(unittest.TestCase):
+    def test_fixture_parent_policy_allows_only_root_owned_sticky_writable_directories(
+        self,
+    ) -> None:
+        root_sticky = mock.Mock(st_mode=stat.S_IFDIR | 0o1777, st_uid=0)
+        root_nonsticky = mock.Mock(st_mode=stat.S_IFDIR | 0o0777, st_uid=0)
+        user_sticky = mock.Mock(st_mode=stat.S_IFDIR | 0o1777, st_uid=os.geteuid())
+
+        self.assertTrue(synthetic._trusted_fixture_parent(root_sticky))
+        self.assertFalse(synthetic._trusted_fixture_parent(root_nonsticky))
+        if os.geteuid() != 0:
+            self.assertFalse(synthetic._trusted_fixture_parent(user_sticky))
+
     def test_synthetic_chain_is_bounded_and_leaves_no_fixture_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -24,9 +24,11 @@ either value in a deployment configuration.
 `verify_codex_cli_identity()` and `prepare_codex_invocation_plan()` now implement the
 **non-executing** portion of this contract. The executable and output schema are opened with
 `O_NOFOLLOW | O_NONBLOCK`, streamed through bounded SHA-256 calculations (rather than copied into
-memory), and bound to stable device/inode/owner/mode/size/time metadata. Hard links, symlinks, writable
-ancestors, mutable modes, wrong digests, special-file substitution, and replacement between
-verification passes are rejected.
+memory), and bound to stable device/inode/owner/mode/size/time metadata. Hard links, symlinks,
+ordinary writable ancestors, mutable modes, wrong digests, special-file substitution, and
+replacement between verification passes are rejected. The only writable-ancestor exception is a
+root-owned sticky directory such as Linux `/tmp`; its sticky semantics protect a private child from
+replacement by a different unprivileged UID, while the documented same-UID limitation remains.
 The invocation directory must already be an exact owner-only `0700` directory with trusted
 ancestors and no entries; the only result name is `result.json`. The resulting plan has an empty
 environment, fixed argv, bounded event/diagnostic limits, stdin prompt digest, schema digest,
