@@ -1,3 +1,4 @@
+import ctypes
 import os
 import tempfile
 import unittest
@@ -22,6 +23,64 @@ from leftovers.runner import (
 
 
 class RunnerTests(unittest.TestCase):
+    def test_linux_child_subreaper_restores_only_state_it_enabled(self) -> None:
+        class FakePrctl:
+            def __init__(self, initial_value: int) -> None:
+                self.initial_value = initial_value
+                self.calls: list[tuple[int, int]] = []
+
+            def __call__(self, option: int, value: int, *_unused: int) -> int:
+                self.calls.append((option, value))
+                if option == runner._LINUX_PR_GET_CHILD_SUBREAPER:
+                    ctypes.cast(
+                        value, ctypes.POINTER(ctypes.c_int)
+                    ).contents.value = self.initial_value
+                return 0
+
+        class FakeLibc:
+            def __init__(self, initial_value: int) -> None:
+                self.prctl = FakePrctl(initial_value)
+
+        libc = FakeLibc(0)
+        with (
+            mock.patch.object(runner.sys, "platform", "linux"),
+            mock.patch("ctypes.CDLL", return_value=libc),
+        ):
+            subreaper = runner._ChildSubreaper()
+            subreaper.enable()
+            subreaper.restore()
+
+        self.assertEqual(
+            libc.prctl.calls,
+            [
+                (runner._LINUX_PR_GET_CHILD_SUBREAPER, mock.ANY),
+                (runner._LINUX_PR_SET_CHILD_SUBREAPER, 1),
+                (runner._LINUX_PR_SET_CHILD_SUBREAPER, 0),
+            ],
+        )
+
+        existing = FakeLibc(1)
+        with (
+            mock.patch.object(runner.sys, "platform", "linux"),
+            mock.patch("ctypes.CDLL", return_value=existing),
+        ):
+            subreaper = runner._ChildSubreaper()
+            subreaper.enable()
+            subreaper.restore()
+        self.assertEqual(existing.prctl.calls, [(runner._LINUX_PR_GET_CHILD_SUBREAPER, mock.ANY)])
+
+    def test_group_reaper_waits_only_for_the_owned_process_group(self) -> None:
+        with mock.patch.object(runner.os, "waitpid", side_effect=[(99, 0), (0, 0)]) as waitpid:
+            runner._reap_terminated_process_group_children(4242)
+
+        self.assertEqual(
+            waitpid.call_args_list,
+            [
+                mock.call(-4242, os.WNOHANG),
+                mock.call(-4242, os.WNOHANG),
+            ],
+        )
+
     def test_ordinary_agent_runner_is_explicitly_rehearsal_only(self) -> None:
         runner_instance = AgentRunner(
             SandboxConfig(runtime="docker", image="image@sha256:abc"),
@@ -82,6 +141,12 @@ class RunnerTests(unittest.TestCase):
         for stream in (process.stdin, process.stdout, process.stderr):
             self.assertIsNotNone(stream)
             self.assertTrue(stream.closed)
+        # The mocked cleanup failure deliberately prevents the production
+        # group terminator from reaping this fixture child. Closing stdin lets
+        # it exit; collect it here so the test itself never leaks a Popen or
+        # leaves an ambiguous zombie for later aggregate-suite garbage
+        # collection.
+        self.assertEqual(process.wait(timeout=5), 0)
 
     def test_host_agent_git_config_mutation_is_rejected_before_controller_git(self) -> None:
         root = Path(tempfile.mkdtemp())

@@ -617,6 +617,17 @@ def _group_alive(process_group: int, process: subprocess.Popen[bytes] | None = N
 def _stop_group(process: subprocess.Popen[bytes]) -> bool:
     """Stop one controller-created process group and prove it no longer exists."""
 
+    # ``Popen.poll`` reaps the direct launcher.  On Linux, an exited but
+    # unreaped session leader can still make ``killpg(pgid, 0)`` succeed, so
+    # repeatedly probing that numeric PGID until the zombie disappears races
+    # with reaping and can falsely report cleanup failure for a launcher that
+    # has already exited.  Once the direct child is reaped, never probe or
+    # signal the recycled numeric PGID again.  The caller separately requires
+    # both capture pipes to reach EOF; the reviewed launcher is a
+    # single-process boundary, so a descendant retaining either pipe remains
+    # a fail-closed cleanup error.
+    if process.poll() is not None:
+        return True
     process_group = process.pid
     if not _group_alive(process_group, process):
         return True
@@ -630,6 +641,8 @@ def _stop_group(process: subprocess.Popen[bytes]) -> bool:
             raise StrictVMLaunchError("launcher process group cannot be terminated") from exc
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return True
             if not _group_alive(process_group, process):
                 return True
             time.sleep(0.02)

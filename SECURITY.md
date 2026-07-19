@@ -61,7 +61,10 @@ and partial publication or cleanup failures.
   launchd wrapper through controller cleanup to the adapter-owned Codex process group. Before OCI
   execution, a durable owner-private cleanup lease is created and can be cleared only by a matching
   hash-chained receipt proving container and workspace removal; unresolved evidence blocks later
-  jobs, reinstall, and uninstall even after the process lock is released.
+  jobs, reinstall, and uninstall even after the process lock is released. On Linux, the runner
+  temporarily enables child-subreaper behavior around its one owned session, reaps only children in
+  that exact process group, and restores the prior setting; an unavailable or unprovable reap remains
+  a cleanup failure.
 - Worker results, telemetry, Codex JSONL/diagnostics, job captures, generated configuration,
   manifests, and cleanup journals are lstat-checked and read through no-follow descriptors with
   total-file and per-line limits. Final post-exit checks cover workers that write oversized files

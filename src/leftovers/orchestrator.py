@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -65,8 +66,31 @@ def _attest_training_rehearsal_component(component_type: type[Any], role: str) -
     if role not in _TRAINING_REHEARSAL_ROLES or not isinstance(component_type, type):
         raise ValueError("training rehearsal component role is invalid")
     module = component_type.__module__
-    if module != "leftovers.rehearsal" and not module.startswith("tests."):
-        raise ValueError("only controller rehearsal or dedicated test components may be attested")
+    if module == "leftovers.rehearsal":
+        pass
+    else:
+        # ``unittest discover -s tests`` imports this file as the top-level
+        # ``test_orchestrator`` module, while explicit module execution may
+        # name it ``tests.test_orchestrator``.  Do not trust that caller-set
+        # string alone: bind the allowance to the exact in-tree test file.
+        loaded_module = sys.modules.get(module)
+        module_file = getattr(loaded_module, "__file__", None)
+        expected_test_file = Path(__file__).resolve().parents[2] / "tests/test_orchestrator.py"
+        try:
+            is_dedicated_test = (
+                module in {"test_orchestrator", "tests.test_orchestrator"}
+                and module_file is not None
+                and Path(module_file).resolve(strict=True)
+                == expected_test_file.resolve(strict=True)
+            )
+        except OSError:
+            is_dedicated_test = False
+        if is_dedicated_test:
+            pass
+        else:
+            raise ValueError(
+                "only controller rehearsal or dedicated test components may be attested"
+            )
     setattr(component_type, _TRAINING_REHEARSAL_ATTRIBUTE, _TRAINING_REHEARSAL_MARKERS[role])
     return component_type
 

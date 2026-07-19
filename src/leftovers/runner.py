@@ -9,6 +9,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -57,6 +58,83 @@ _TELEMETRY_MAX_EVENTS = 1_024
 _RUNNER_PROCESS_GROUP_ENV = "LEFTOVERS_RUNNER_OWNS_PROCESS_GROUP"
 _TERMINATION_GRACE_SECONDS = 5.0
 _KILL_CONFIRM_SECONDS = 2.0
+_LINUX_PR_SET_CHILD_SUBREAPER = 36
+_LINUX_PR_GET_CHILD_SUBREAPER = 37
+
+
+class _ChildSubreaper:
+    """Temporarily adopt killed Linux descendants so they can be reaped.
+
+    A runner starts a new session but cannot rely on the session leader to
+    reap its children.  If that leader exits first, Linux otherwise reparents
+    descendants to the container's PID 1, which is commonly a test runner and
+    may leave a zombie indefinitely.  A zombie cannot execute code, but it
+    still consumes a PID and makes ``killpg(..., 0)`` report a misleading live
+    process group.  The setting is process-local and scoped to one execution;
+    unsupported platforms retain the existing fail-closed group check.
+    """
+
+    def __init__(self) -> None:
+        self._libc: Any | None = None
+        self._restore = False
+
+    def enable(self) -> None:
+        if sys.platform != "linux":
+            return
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            prctl = libc.prctl
+            prctl.restype = ctypes.c_int
+            prctl.argtypes = (
+                ctypes.c_int,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+            )
+            current = ctypes.c_int()
+            if (
+                prctl(
+                    _LINUX_PR_GET_CHILD_SUBREAPER,
+                    ctypes.cast(ctypes.byref(current), ctypes.c_void_p).value or 0,
+                    0,
+                    0,
+                    0,
+                )
+                != 0
+            ):
+                return
+            self._libc = libc
+            if current.value == 0 and prctl(_LINUX_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0:
+                self._restore = True
+        except (AttributeError, OSError):
+            # Linux sandbox policies may deny prctl.  In that case cleanup
+            # remains conservative: an unreaped group causes a cleanup error.
+            self._libc = None
+
+    def restore(self) -> None:
+        if not self._restore or self._libc is None:
+            return
+        try:
+            if self._libc.prctl(_LINUX_PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) != 0:
+                raise OSError("could not restore Linux child-subreaper state")
+        finally:
+            self._restore = False
+            self._libc = None
+
+
+def _reap_terminated_process_group_children(process_group: int) -> None:
+    """Reap exited children in one owned group without touching other jobs."""
+
+    while True:
+        try:
+            pid, _status = os.waitpid(-process_group, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
 
 
 def _process_group_is_alive(process: subprocess.Popen[bytes], process_group: int) -> bool:
@@ -70,6 +148,7 @@ def _process_group_is_alive(process: subprocess.Popen[bytes], process_group: int
     # Refresh the direct-child status before interpreting a platform-specific
     # EPERM from killpg(2).  This closes the small reap race after SIGKILL.
     process.poll()
+    _reap_terminated_process_group_children(process_group)
     try:
         os.killpg(process_group, 0)
     except ProcessLookupError:
@@ -485,6 +564,7 @@ def execute(
     stdout_thread: threading.Thread | None = None
     stderr_thread: threading.Thread | None = None
     stdin_thread: threading.Thread | None = None
+    child_subreaper = _ChildSubreaper()
     child_env = dict(env)
     # This marker is set by the controller after the process group identity is
     # fixed.  Adapters use it to keep their child inside this same group rather
@@ -493,6 +573,7 @@ def execute(
     primary_error: BaseException | None = None
     cleanup_errors: list[BaseException] = []
     try:
+        child_subreaper.enable()
         process = subprocess.Popen(
             argv,
             cwd=cwd,
@@ -562,6 +643,10 @@ def execute(
                     cleanup_errors.append(exc)
                 if thread.is_alive():
                     cleanup_errors.append(RunnerError("runner I/O thread did not terminate"))
+        try:
+            child_subreaper.restore()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
     if cleanup_errors:
         cleanup_error = next(
             (error for error in cleanup_errors if isinstance(error, RunnerCleanupError)),

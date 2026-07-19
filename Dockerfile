@@ -31,6 +31,8 @@ RUN apt-get update \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin leftovers
 
 WORKDIR /app
+COPY --chown=leftovers:leftovers AGENTS.md ARCHITECTURE.md CONTRIBUTING.md LICENSE Makefile PROTOCOL.md README.md SECURITY.md pyproject.toml /app/
+COPY --chown=leftovers:leftovers .github /app/.github
 COPY --chown=leftovers:leftovers src /app/src
 COPY --chown=leftovers:leftovers tests /app/tests
 COPY --chown=leftovers:leftovers config /app/config
@@ -39,6 +41,7 @@ COPY --chown=leftovers:leftovers sandbox /app/sandbox
 COPY --chown=leftovers:leftovers schemas /app/schemas
 COPY --chown=leftovers:leftovers schedules /app/schedules
 COPY --chown=leftovers:leftovers scripts /app/scripts
+COPY --chown=leftovers:leftovers vm /app/vm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sys
 import tempfile
 import textwrap
@@ -33,6 +34,7 @@ from leftovers.strict_vm_runner import (
     StrictVMRunnerError,
     _drain_launcher,
     _read_pinned_policy,
+    _stop_group,
     _validate_guest_policy,
     verify_static_readiness,
 )
@@ -406,6 +408,23 @@ class StrictVMOneEpochControllerTests(unittest.TestCase):
         ):
             returncode, stdout, stderr = _drain_launcher(str(launcher), manifest, timeout_seconds=2)
         self.assertEqual((returncode, stdout, stderr), (0, b"ok", b""))
+
+    def test_stop_group_does_not_probe_a_group_after_reaping_its_leader(self) -> None:
+        process = mock.Mock()
+        process.pid = 12345
+        # The leader exits after SIGTERM while its pre-reap zombie still makes
+        # Linux killpg(..., 0) report a live group.
+        process.poll.side_effect = (None, None, 0)
+        with mock.patch("leftovers.strict_vm_runner.os.killpg") as killpg:
+            self.assertTrue(_stop_group(process))
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(12345, 0),
+                mock.call(12345, signal.SIGTERM),
+                mock.call(12345, 0),
+            ],
+        )
 
     def test_output_flood_retains_the_lease_after_launch(self) -> None:
         with self.assertRaises(StrictVMOutputOverflow):

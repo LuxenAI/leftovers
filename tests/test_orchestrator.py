@@ -177,6 +177,11 @@ class _TrainingFixtureLease(WorkspaceLease):
 
 
 class OrchestratorTests(unittest.TestCase):
+    def test_training_attestation_rejects_a_forged_test_module_name(self) -> None:
+        forged = type("ForgedTrainingRunner", (), {"__module__": "tests.forged"})
+        with self.assertRaisesRegex(ValueError, "dedicated test components"):
+            _training_rehearsal_component("runner")(forged)
+
     def test_runner_cleanup_failure_bypasses_failed_outcome_conversion(self) -> None:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(root))
