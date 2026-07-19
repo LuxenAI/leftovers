@@ -2,10 +2,13 @@
 
 This module deliberately contains no socket, path, directory, subprocess, or
 service implementation.  It describes the *only* durable state a future
-dedicated-UID broker may need to persist.  A real installation must provide a
-root-owned, descriptor-relative, no-follow journal sink whose ``append`` is
-durable before it returns.  Passing ordinary paths to this module is
-impossible by design.
+dedicated-UID broker may need to persist.  It does not assume that two files
+(an append log and a rollback witness) can be committed atomically: ordinary
+filesystems cannot make that promise.  Instead, every commit writes a complete
+self-validating state image to the inactive one of two broker-owned slots.
+Recovery chooses the newest complete slot and ignores a torn or cross-file
+mismatched peer.  Passing ordinary paths to this module is impossible by
+design.
 
 The model is conservative across a crash: incomplete uploads are quarantined,
 not resumed.  Their request IDs and any reservation remain consumed, so a torn
@@ -33,10 +36,20 @@ from .strict_vm_broker import (
     BrokerUnavailableError,
     StrictVMBrokerError,
 )
+from .vm_bundle import (
+    BundleError,
+    DescriptorRequestIdentity,
+    ParsedBundle,
+    parse_request_bundle_descriptor,
+)
 
 JOURNAL_VERSION = 1
 MAX_JOURNAL_RECORD_BYTES = 32 * 1_024
-MAX_JOURNAL_RECORDS = 8_192
+# Each alternating slot contains a complete image, not an unbounded append
+# file.  Keep the pure recovery model deliberately small until a reviewed
+# compaction protocol and native storage backend exist.
+MAX_SLOT_RECORDS = 128
+MAX_SLOT_IMAGE_BYTES = 4 * 1_024 * 1_024
 MAX_DURABLE_ALLOCATIONS = MAX_PENDING_ALLOCATIONS
 MAX_DURABLE_REPLAY_GUARDS = MAX_REPLAY_GUARDS
 MAX_TOKEN_RESERVATIONS = 256
@@ -44,6 +57,7 @@ MAX_RESERVED_TOKENS = 1_000_000
 MAX_TOKEN_RESERVATION_TOKENS = 100_000
 LFRQ_HEADER_BYTES = 4_096
 LFRQ_MAX_BYTES = 256 * 1_024 * 1_024
+STRICT_VM_BROKER_DESCRIPTOR_ADMISSION_ENABLED = False
 _LFRQ_PREFIX = struct.Struct("<4sHHHHQ32s64sI32s32s")
 _LFRQ_SECTION = struct.Struct("<16sQQ32s")
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
@@ -55,6 +69,7 @@ _JOURNAL_TYPES = frozenset(
         "append",
         "staged",
         "quarantined",
+        "boot_rollover",
         "token_reserved",
         "token_settled",
     }
@@ -67,6 +82,22 @@ class BrokerJournalError(StrictVMBrokerError):
 
 class BrokerJournalRollbackError(BrokerJournalError):
     """A journal prefix, genesis, or monotonic epoch could have been rolled back."""
+
+
+@dataclass(frozen=True)
+class BrokerBootSessionEvidence:
+    """Digest supplied by a future native adapter for one host boot session.
+
+    This pure Python value is intentionally not authority: callers can create
+    it in tests, and no production broker path reaches this model.  A future
+    dedicated-UID native adapter must derive it from an OS-backed boot session
+    identity and bind it before the source-disabled service is ever enabled.
+    """
+
+    sha256: str
+
+    def __post_init__(self) -> None:
+        _require_hex(self.sha256, "broker boot-session digest")
 
 
 @dataclass(frozen=True)
@@ -111,6 +142,21 @@ class DescriptorRelativeLFRQ(Protocol):
     def pread_exact(self, size: int, offset: int) -> bytes: ...
 
 
+class RetainedLFRQDescriptor(Protocol):
+    """A no-follow FD retained by the future broker after private-dir open.
+
+    This interface has no pathname and requires the adapter to carry the
+    complete ``fstat`` snapshot captured immediately after descriptor-relative
+    ``O_NOFOLLOW`` acquisition.  The parser independently rechecks every
+    identity member through that descriptor before and after bounded reads.
+    """
+
+    descriptor: int
+    identity: DescriptorRequestIdentity
+    opened_relative_to_private_root: bool
+    opened_nofollow: bool
+
+
 @dataclass(frozen=True)
 class JournalRecord:
     """One canonical, hash-linked, already-fsynced journal record."""
@@ -125,11 +171,12 @@ class JournalRecord:
 
 @dataclass(frozen=True)
 class BrokerJournalAnchor:
-    """Root-owned rollback witness, updated atomically with the append log.
+    """The chain boundary embedded inside one durable slot image.
 
-    A hash chain alone detects a modified record but cannot distinguish a valid
-    older prefix from the newest log.  Recovery therefore requires this
-    separately durable witness from the broker's private installation.
+    Keeping this witness in the same verified image as the records avoids an
+    impossible cross-file atomicity claim.  It detects torn/crossed slot
+    contents, but cannot stop a compromised broker or storage administrator
+    from rolling *both* slots back; that needs a separate root/external anchor.
     """
 
     record_count: int
@@ -146,20 +193,34 @@ class BrokerJournalAnchor:
             raise BrokerJournalError("journal rollback witness is malformed")
 
 
-class BrokerJournalSink(Protocol):
-    """Future broker-owned atomic commit primitive for journal and witness.
+@dataclass(frozen=True)
+class BrokerJournalSlot:
+    """One whole durable journal image for the alternating two-slot protocol.
 
-    ``commit_fsynced`` must durably publish *both* the next record and the
-    matching root-owned rollback witness as one crash-consistent commit before
-    it returns.  A simple append followed by a separate anchor write does not
-    meet this contract: a crash between them permanently wedges recovery.
-
-    A production implementation belongs in the separately reviewed launchd
-    service. It must use broker-owned descriptor-relative storage and must not
-    accept a caller-selected file name or ``Path`` from this package.
+    ``slot_sha256`` covers the generation, embedded anchor, and all canonical
+    records.  It is corruption detection, not a signature or rollback anchor.
+    The deliberately pure model does not prescribe an on-disk encoding.
     """
 
-    def commit_fsynced(self, record: bytes, anchor: BrokerJournalAnchor) -> None: ...
+    generation: int
+    records: tuple[bytes, ...]
+    anchor: BrokerJournalAnchor
+    slot_sha256: str
+
+
+class BrokerJournalSink(Protocol):
+    """Source-disabled two-slot storage contract for a future broker service.
+
+    The adapter reads both complete slot images and writes/fsyncs only the
+    inactive slot.  It must never overwrite the active slot in place.  A write
+    exception is ambiguous: the image might have reached durable storage after
+    the error, so the current process must recover before serving another
+    request.  The adapter is not implemented here and accepts no caller path.
+    """
+
+    def read_slots(self) -> tuple[object | None, object | None]: ...
+
+    def write_slot_fsynced(self, slot_index: int, slot: BrokerJournalSlot) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -202,6 +263,71 @@ class UnverifiedLFRQHeaderObservation:
     total_size: int
     unverified_mediation_authority: str
     unverified_mediation_reservation_id: str | None
+
+
+@dataclass(frozen=True)
+class BrokerLFRQAdmissionBinding:
+    """Controller identity the future broker must match before it can launch.
+
+    This is deliberately a data-only expectation sourced from the broker's
+    attested durable state.  A Python caller can construct one for tests, but
+    cannot turn it into authority: public broker admission remains
+    source-disabled before it reads a descriptor.
+    """
+
+    run_id: str
+    round: int
+    stage: str
+    repository: str
+    issue_number: int
+    base_sha: str
+    manifest_sha256: str
+    task_sha256: str
+    policy_sha256: str
+    check_registry_sha256: str
+    action_batch_sha256: str
+    mediation_receipt_sha256: str
+    proposed_patch_sha256: str | None
+    reservation_id: str
+    reservation_tokens: int
+    boot_session_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            _HEX32.fullmatch(self.run_id) is None
+            or type(self.round) is not int
+            or not 0 <= self.round <= 1_000_000
+            or self.stage not in {"planning", "implementation", "review", "final_verify"}
+            or type(self.repository) is not str
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}",
+                self.repository,
+            )
+            is None
+            or type(self.issue_number) is not int
+            or self.issue_number <= 0
+            or re.fullmatch(r"[0-9a-f]{40}", self.base_sha) is None
+            or any(
+                _HEX64.fullmatch(value) is None
+                for value in (
+                    self.manifest_sha256,
+                    self.task_sha256,
+                    self.policy_sha256,
+                    self.check_registry_sha256,
+                    self.action_batch_sha256,
+                    self.mediation_receipt_sha256,
+                    self.reservation_id,
+                    self.boot_session_sha256,
+                )
+            )
+            or type(self.reservation_tokens) is not int
+            or not 1 <= self.reservation_tokens <= MAX_TOKEN_RESERVATION_TOKENS
+            or (
+                self.proposed_patch_sha256 is not None
+                and _HEX64.fullmatch(self.proposed_patch_sha256) is None
+            )
+        ):
+            raise BrokerJournalError("broker LFRQ admission binding is malformed")
 
 
 def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -328,29 +454,127 @@ def _decode_record(raw: bytes) -> JournalRecord:
     )
 
 
-class DurableBrokerJournal:
-    """Fsync-before-ack journal model with deterministic restart recovery.
+def _slot_sha256(generation: int, records: tuple[bytes, ...], anchor: BrokerJournalAnchor) -> str:
+    """Return a streaming, length-prefixed integrity digest for one slot image."""
 
-    It does not know how to open storage.  ``BrokerJournalSink`` is deliberately
-    narrower than a file-like object so a future implementation cannot be
-    tempted to accept caller paths, truncate, rename, or rewrite the journal.
+    if type(generation) is not int or generation < 0:
+        raise BrokerJournalError("journal slot generation is invalid")
+    if type(anchor) is not BrokerJournalAnchor:
+        raise BrokerJournalError("journal slot anchor type is invalid")
+    if type(records) is not tuple or not records or len(records) > MAX_SLOT_RECORDS:
+        raise BrokerJournalError("journal slot records are absent or exceed their cap")
+    digest = hashlib.sha256()
+    digest.update(b"leftovers.strict-vm-broker.slot.v1\0")
+    digest.update(generation.to_bytes(8, "big", signed=False))
+    digest.update(anchor.record_count.to_bytes(8, "big", signed=False))
+    digest.update(bytes.fromhex(anchor.head_sha256))
+    digest.update(bytes.fromhex(anchor.genesis_sha256))
+    total_bytes = 0
+    for raw in records:
+        if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_JOURNAL_RECORD_BYTES:
+            raise BrokerJournalError("journal slot contains an invalid record image")
+        total_bytes += len(raw)
+        if total_bytes > MAX_SLOT_IMAGE_BYTES:
+            raise BrokerJournalError("journal slot image exceeds its byte cap")
+        digest.update(len(raw).to_bytes(8, "big", signed=False))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
+def _make_slot(
+    generation: int, records: tuple[bytes, ...], installation: BrokerInstallation
+) -> BrokerJournalSlot:
+    """Build a complete slot image only after the candidate chain is valid."""
+
+    decoded = _validate_slot_records(installation, records)
+    anchor = BrokerJournalAnchor(
+        len(decoded), decoded[-1].sha256, journal_genesis_sha256(installation)
+    )
+    return BrokerJournalSlot(generation, records, anchor, _slot_sha256(generation, records, anchor))
+
+
+def _validate_slot_records(
+    installation: BrokerInstallation, records: tuple[bytes, ...]
+) -> tuple[JournalRecord, ...]:
+    """Validate one complete hash chain without trusting any separate witness."""
+
+    if not records or len(records) > MAX_SLOT_RECORDS:
+        raise BrokerJournalRollbackError("journal slot is absent, empty, or exceeds its record cap")
+    decoded: list[JournalRecord] = []
+    previous = "0" * 64
+    total_bytes = 0
+    for expected_sequence, raw in enumerate(records):
+        if not isinstance(raw, bytes):
+            raise BrokerJournalError("journal slot record type is invalid")
+        total_bytes += len(raw)
+        if total_bytes > MAX_SLOT_IMAGE_BYTES:
+            raise BrokerJournalRollbackError("journal slot image exceeds its byte cap")
+        record = _decode_record(raw)
+        if record.sequence != expected_sequence or record.previous_sha256 != previous:
+            raise BrokerJournalRollbackError("journal sequence or chain linkage is invalid")
+        if expected_sequence == 0:
+            if (
+                record.kind != "genesis"
+                or set(record.body) != {"boot_session_sha256", "installation_sha256"}
+                or record.body.get("installation_sha256") != journal_genesis_sha256(installation)
+            ):
+                raise BrokerJournalRollbackError(
+                    "journal genesis does not bind this installation/boot set"
+                )
+            _require_hex(record.body.get("boot_session_sha256"), "journal boot-session digest")
+        decoded.append(record)
+        previous = record.sha256
+    return tuple(decoded)
+
+
+class DurableBrokerJournal:
+    """Two-slot, fsync-before-reply journal model with deterministic recovery.
+
+    The model writes a *whole candidate chain* to the inactive slot rather than
+    pretending an append log and a separate witness have atomic cross-file
+    durability.  It does not know how to open storage.  ``BrokerJournalSink``
+    is deliberately narrower than a file-like object so a future implementation
+    cannot be tempted to accept caller paths, truncate, rename, or rewrite the
+    active slot in place.
     """
 
-    def __init__(self, installation: BrokerInstallation, sink: BrokerJournalSink) -> None:
+    def __init__(
+        self,
+        installation: BrokerInstallation,
+        sink: BrokerJournalSink,
+        boot_session: BrokerBootSessionEvidence,
+    ) -> None:
         self.installation = installation
         self._sink = sink
+        self._boot_session = boot_session
         self.records: list[JournalRecord] = []
         self.allocations: dict[str, DurableAllocation] = {}
         self.replay_guards: dict[str, int] = {}
         self.reservations: dict[str, TokenReservation] = {}
         self._last_monotonic_ns = -1
+        self._active_slot_index: int | None = None
+        self._generation = -1
+        self._recovery_required = False
 
     @classmethod
     def create(
-        cls, installation: BrokerInstallation, sink: BrokerJournalSink
+        cls,
+        installation: BrokerInstallation,
+        sink: BrokerJournalSink,
+        *,
+        boot_session: BrokerBootSessionEvidence,
     ) -> DurableBrokerJournal:
-        journal = cls(installation, sink)
-        journal._append("genesis", {"installation_sha256": journal_genesis_sha256(installation)})
+        slots = cls._read_slots(sink)
+        if any(slot is not None for slot in slots):
+            raise BrokerJournalError("refusing to initialize nonempty broker slot storage")
+        journal = cls(installation, sink, boot_session)
+        journal._append(
+            "genesis",
+            {
+                "boot_session_sha256": boot_session.sha256,
+                "installation_sha256": journal_genesis_sha256(installation),
+            },
+        )
         return journal
 
     @classmethod
@@ -358,46 +582,110 @@ class DurableBrokerJournal:
         cls,
         installation: BrokerInstallation,
         sink: BrokerJournalSink,
-        records: tuple[bytes, ...],
-        anchor: BrokerJournalAnchor,
+        *,
+        boot_session: BrokerBootSessionEvidence,
+        now_ns: int,
     ) -> DurableBrokerJournal:
-        """Recover exactly one complete chain; torn suffixes and prefix rollback fail closed."""
+        """Recover the newest complete slot; ignore an incomplete peer slot.
 
-        if not records or len(records) > MAX_JOURNAL_RECORDS:
-            raise BrokerJournalRollbackError("journal is absent, empty, or exceeds its record cap")
-        if anchor.genesis_sha256 != journal_genesis_sha256(installation):
-            raise BrokerJournalRollbackError(
-                "journal witness does not bind this installation/boot set"
+        A valid but older slot is recoverable when its peer is torn, witness-ahead,
+        or journal-ahead.  If both are invalid, recovery fails closed.  This
+        cannot detect rollback of *both* slots by a compromised broker/storage
+        authority; an external/root anchor remains a separate requirement.
+        """
+
+        candidates: list[tuple[int, int, DurableBrokerJournal, BrokerJournalSlot]] = []
+        for index, slot in enumerate(cls._read_slots(sink)):
+            if slot is None:
+                continue
+            try:
+                candidate = cls._from_slot(installation, sink, slot, boot_session)
+            except BrokerJournalError:
+                continue
+            candidates.append((candidate._generation, index, candidate, slot))
+        if not candidates:
+            raise BrokerJournalRollbackError("no complete broker journal slot is recoverable")
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        generation, index, journal, selected = candidates[0]
+        for other_generation, _other_index, _other_journal, other in candidates[1:]:
+            if other_generation == generation and other.slot_sha256 != selected.slot_sha256:
+                raise BrokerJournalRollbackError("broker slots fork at one generation")
+            if abs(other_generation - generation) > 1:
+                raise BrokerJournalRollbackError("broker slot generations have an impossible gap")
+        journal._active_slot_index = index
+        journal._generation = generation
+        if type(now_ns) is not int or now_ns < 0:
+            raise BrokerJournalRollbackError("new boot monotonic epoch is invalid")
+        if journal._boot_session.sha256 != boot_session.sha256:
+            # The native supplied session digest changed, so monotonic time may
+            # restart.  First persist quarantine for every pending request in
+            # the old epoch, then persist the new session boundary. Replay and
+            # reservation state remains conservative and is never cleared.
+            for allocation in tuple(journal.allocations.values()):
+                if allocation.state in {"uploading", "staged"}:
+                    journal.quarantine(allocation.allocation.allocation_id, reason="boot_rollover")
+            journal._append(
+                "boot_rollover",
+                {
+                    "boot_session_sha256": boot_session.sha256,
+                    "observed_at_ns": now_ns,
+                },
             )
-        if len(records) != anchor.record_count:
+        # On same-boot recovery, a zero-byte allocation has no staged request
+        # to tear and may be replayed exactly. Any partially uploaded request
+        # (and every staged request) is quarantined instead of resumed.
+        for allocation in tuple(journal.allocations.values()):
+            if allocation.state == "staged" or (
+                allocation.state == "uploading" and allocation.total_bytes > 0
+            ):
+                journal.quarantine(allocation.allocation.allocation_id, reason="restart")
+        return journal
+
+    @staticmethod
+    def _read_slots(sink: BrokerJournalSink) -> tuple[object | None, object | None]:
+        try:
+            slots = sink.read_slots()
+        except Exception as exc:
+            raise BrokerJournalError("broker slot storage cannot be read") from exc
+        if type(slots) is not tuple or len(slots) != 2:
+            raise BrokerJournalError("broker slot storage did not return exactly two slots")
+        return slots
+
+    @classmethod
+    def _from_slot(
+        cls,
+        installation: BrokerInstallation,
+        sink: BrokerJournalSink,
+        raw_slot: object,
+        boot_session: BrokerBootSessionEvidence,
+    ) -> DurableBrokerJournal:
+        if type(raw_slot) is not BrokerJournalSlot:
+            raise BrokerJournalError("broker slot image type is invalid")
+        slot = raw_slot
+        if type(slot.anchor) is not BrokerJournalAnchor:
+            raise BrokerJournalError("broker slot anchor type is invalid")
+        if (
+            type(slot.generation) is not int
+            or slot.generation < 0
+            or type(slot.slot_sha256) is not str
+            or _HEX64.fullmatch(slot.slot_sha256) is None
+            or slot.anchor.genesis_sha256 != journal_genesis_sha256(installation)
+            or _slot_sha256(slot.generation, slot.records, slot.anchor) != slot.slot_sha256
+        ):
             raise BrokerJournalRollbackError(
-                "journal length differs from its durable rollback witness"
+                "broker slot integrity or installation binding is invalid"
             )
-        journal = cls(installation, sink)
-        previous = "0" * 64
-        for expected_sequence, raw in enumerate(records):
-            record = _decode_record(raw)
-            if record.sequence != expected_sequence or record.previous_sha256 != previous:
-                raise BrokerJournalRollbackError("journal sequence or chain linkage is invalid")
-            if expected_sequence == 0:
-                expected = {"installation_sha256": journal_genesis_sha256(installation)}
-                if record.kind != "genesis" or record.body != expected:
-                    raise BrokerJournalRollbackError(
-                        "journal genesis does not bind this installation/boot set"
-                    )
+        records = _validate_slot_records(installation, slot.records)
+        if (
+            slot.anchor.record_count != len(records)
+            or slot.anchor.head_sha256 != records[-1].sha256
+        ):
+            raise BrokerJournalRollbackError("broker slot journal and embedded witness disagree")
+        journal = cls(installation, sink, boot_session)
+        for record in records:
             journal._apply(record)
             journal.records.append(record)
-            previous = record.sha256
-        if previous != anchor.head_sha256:
-            raise BrokerJournalRollbackError(
-                "journal head differs from its durable rollback witness"
-            )
-        # A service restart must never continue a partially streamed request.
-        # Its data may have been torn or its staged file may have been replaced;
-        # preserve the request ID/reservation while making reuse impossible.
-        for allocation in tuple(journal.allocations.values()):
-            if allocation.state == "uploading":
-                journal.quarantine(allocation.allocation.allocation_id, reason="restart")
+        journal._generation = slot.generation
         return journal
 
     @property
@@ -405,21 +693,45 @@ class DurableBrokerJournal:
         return "0" * 64 if not self.records else self.records[-1].sha256
 
     def snapshot(self) -> tuple[bytes, ...]:
-        """Return canonical records for an external root-owned, read-only replay source."""
+        """Return the bounded canonical records in the current in-memory slot image."""
 
         return tuple(record.raw for record in self.records)
 
     @property
+    def slot_snapshot(self) -> BrokerJournalSlot:
+        """Return the current complete slot image for deterministic fixture inspection."""
+
+        if self._generation < 0:
+            raise BrokerJournalError("broker journal has no durable slot")
+        return _make_slot(self._generation, self.snapshot(), self.installation)
+
+    @property
+    def recovery_required(self) -> bool:
+        """Whether an ambiguous write error requires restart recovery before use."""
+
+        return self._recovery_required
+
+    @property
+    def boot_session_sha256(self) -> str:
+        """Return the latest durably recorded boot session digest."""
+
+        return self._boot_session.sha256
+
+    @property
     def anchor(self) -> BrokerJournalAnchor:
-        """Model the separately fsynced private rollback witness after an append."""
+        """Return the chain boundary embedded in the current slot image."""
 
         return BrokerJournalAnchor(
             len(self.records), self.head_sha256, journal_genesis_sha256(self.installation)
         )
 
     def _append(self, kind: str, body: dict[str, Any]) -> JournalRecord:
-        if len(self.records) >= MAX_JOURNAL_RECORDS:
-            raise BrokerJournalError("journal record cap is exhausted")
+        if self._recovery_required:
+            raise BrokerJournalError(
+                "broker journal requires recovery after an ambiguous slot write"
+            )
+        if len(self.records) >= MAX_SLOT_RECORDS:
+            raise BrokerJournalError("broker slot history cap is exhausted")
         raw, digest = _record_bytes(
             sequence=len(self.records), previous_sha256=self.head_sha256, kind=kind, body=body
         )
@@ -427,31 +739,42 @@ class DurableBrokerJournal:
         # Validate a candidate state before touching durable storage.  The
         # journal is append-only, so persisting a semantically invalid record
         # would otherwise permanently wedge future recovery.
-        preview = DurableBrokerJournal(self.installation, self._sink)
+        preview = DurableBrokerJournal(self.installation, self._sink, self._boot_session)
         preview.allocations = self.allocations.copy()
         preview.replay_guards = self.replay_guards.copy()
         preview.reservations = self.reservations.copy()
         preview._last_monotonic_ns = self._last_monotonic_ns
         preview._apply(record)
-        next_anchor = BrokerJournalAnchor(
-            len(self.records) + 1, digest, journal_genesis_sha256(self.installation)
-        )
+        next_records = self.snapshot() + (raw,)
+        next_generation = self._generation + 1
+        next_slot = _make_slot(next_generation, next_records, self.installation)
+        target_slot = 0 if self._active_slot_index != 0 else 1
         # The service may update in-memory authority only after its dedicated
-        # sink confirms an atomic durable journal+witness commit. A failure is
-        # a hard failure with no in-memory authority mutation.
+        # sink confirms the inactive, whole state image.  An error is
+        # ambiguous: a later crash recovery may discover that the write made
+        # durable progress, so this live instance must serve nothing further.
         try:
-            self._sink.commit_fsynced(raw, next_anchor)
+            self._sink.write_slot_fsynced(target_slot, next_slot)
         except Exception as exc:
-            raise BrokerJournalError("journal+witness commit was not durably acknowledged") from exc
+            self._recovery_required = True
+            raise BrokerJournalError("broker slot commit was not durably acknowledged") from exc
         self._apply(record)
         self.records.append(record)
+        self._active_slot_index = target_slot
+        self._generation = next_generation
         return record
+
+    def _ensure_usable(self) -> None:
+        if self._recovery_required:
+            raise BrokerJournalError(
+                "broker journal requires recovery after an ambiguous slot write"
+            )
 
     def _apply(self, record: JournalRecord) -> None:
         body = record.body
         if record.kind == "genesis":
-            return
-        if record.kind == "allocation":
+            self._apply_genesis(body)
+        elif record.kind == "allocation":
             self._apply_allocation(body)
         elif record.kind == "append":
             self._apply_append(body)
@@ -459,12 +782,38 @@ class DurableBrokerJournal:
             self._apply_staged(body)
         elif record.kind == "quarantined":
             self._apply_quarantined(body)
+        elif record.kind == "boot_rollover":
+            self._apply_boot_rollover(body)
         elif record.kind == "token_reserved":
             self._apply_token_reserved(body)
         elif record.kind == "token_settled":
             self._apply_token_settled(body)
         else:  # guarded by _record_bytes, retained for defensive replay.
             raise BrokerJournalError("journal event type is unsupported")
+
+    def _apply_genesis(self, body: dict[str, Any]) -> None:
+        if set(body) != {"boot_session_sha256", "installation_sha256"}:
+            raise BrokerJournalError("journal genesis body is invalid")
+        if body["installation_sha256"] != journal_genesis_sha256(self.installation):
+            raise BrokerJournalRollbackError("journal genesis installation binding is invalid")
+        self._boot_session = BrokerBootSessionEvidence(
+            _require_hex(body["boot_session_sha256"], "journal boot-session digest")
+        )
+
+    def _apply_boot_rollover(self, body: dict[str, Any]) -> None:
+        if set(body) != {"boot_session_sha256", "observed_at_ns"}:
+            raise BrokerJournalError("journal boot rollover body is invalid")
+        next_session = BrokerBootSessionEvidence(
+            _require_hex(body["boot_session_sha256"], "journal boot-session digest")
+        )
+        if (
+            next_session.sha256 == self._boot_session.sha256
+            or type(body["observed_at_ns"]) is not int
+            or body["observed_at_ns"] < 0
+        ):
+            raise BrokerJournalError("journal boot rollover is invalid")
+        self._boot_session = next_session
+        self._last_monotonic_ns = body["observed_at_ns"]
 
     def _apply_allocation(self, body: dict[str, Any]) -> None:
         required = {
@@ -586,6 +935,7 @@ class DurableBrokerJournal:
     def _apply_quarantined(self, body: dict[str, Any]) -> None:
         if set(body) != {"allocation_id", "reason"} or body["reason"] not in {
             "restart",
+            "boot_rollover",
             "invalid",
             "expired",
         }:
@@ -649,10 +999,28 @@ class DurableBrokerJournal:
     def allocate(self, peer: BrokerPeer, request_id: str, now_ns: int) -> BrokerAllocation:
         """Persist a broker-generated allocation before returning it to a peer."""
 
+        self._ensure_usable()
         if peer.uid != self.installation.controller_uid or peer.uid < 0 or peer.gid < 0:
             raise BrokerAuthorizationError("journal peer is not the installed controller")
         _require_hex(request_id, "request id", size=32)
-        if type(now_ns) is not int or now_ns < 0 or now_ns < self._last_monotonic_ns:
+        if type(now_ns) is not int or now_ns < 0:
+            raise BrokerJournalRollbackError("broker monotonic epoch is invalid")
+        # Allocation is an idempotent request/reply operation.  If the slot
+        # reached durable storage just before a crash but the reply was lost,
+        # the same installed peer can recover the exact broker-generated value
+        # without creating a second epoch or wedging the durable prefix.
+        for state in self.allocations.values():
+            if state.request_id == request_id:
+                if state.peer != peer:
+                    raise BrokerAuthorizationError("allocation replay peer does not match")
+                if (
+                    state.state == "uploading"
+                    and state.total_bytes == 0
+                    and now_ns <= state.allocation.expires_at_ns
+                ):
+                    return state.allocation
+                raise BrokerJournalError("allocation replay is no longer safely resumable")
+        if now_ns < self._last_monotonic_ns:
             raise BrokerJournalRollbackError(
                 "broker monotonic epoch regressed; replay safety is unknown"
             )
@@ -697,6 +1065,7 @@ class DurableBrokerJournal:
     ) -> None:
         """Durably record an accepted chunk's digest; the future service stores bytes separately."""
 
+        self._ensure_usable()
         allocation_id = _require_hex(allocation_id, "allocation id", size=32)
         _require_hex(lease_token, "lease token", size=32)
         state = self.allocations.get(allocation_id)
@@ -729,24 +1098,23 @@ class DurableBrokerJournal:
         self._last_monotonic_ns = now_ns
 
     def validate_and_stage_lfrq(self, allocation_id: str, reader: DescriptorRelativeLFRQ) -> None:
-        """Model the required pre-stage descriptor inspection and fail closed.
+        """Deny public admission before observing a descriptor or controller bytes.
 
-        The only non-fixture authority type is ``broker``, and no verifier for
-        it exists.  Fixture authority is likewise prohibited from a broker
-        epoch.  Consequently this method always refuses after binding the
-        header; it is present to make bypassing the required inspection
-        impossible in a future service integration.
+        A future daemon may use :func:`inspect_complete_lfrq_admission_contract`
+        only after an independently reviewed installation/peer attestation and
+        an atomic staged-plus-token-reservation commit are available.
         """
 
-        allocation_id = _require_hex(allocation_id, "allocation id", size=32)
-        allocation = self.allocations.get(allocation_id)
-        if allocation is None or allocation.state != "uploading":
-            raise BrokerJournalError("allocation cannot accept a staged LFRQ")
-        observation = observe_unverified_lfrq_header(reader, allocation)
-        del observation
-        raise BrokerUnavailableError("LFRQ attestation verification is not implemented")
+        del self, allocation_id, reader
+        if not STRICT_VM_BROKER_DESCRIPTOR_ADMISSION_ENABLED:
+            raise BrokerUnavailableError(
+                "descriptor admission lacks installed broker peer/launchd attestation "
+                "and atomic staged-plus-token-reservation evidence"
+            )
+        raise BrokerUnavailableError("strict VM descriptor admission is not implemented")
 
     def quarantine(self, allocation_id: str, *, reason: str) -> None:
+        self._ensure_usable()
         allocation_id = _require_hex(allocation_id, "allocation id", size=32)
         self._append("quarantined", {"allocation_id": allocation_id, "reason": reason})
 
@@ -760,6 +1128,7 @@ class DurableBrokerJournal:
         evidence, not from an untrusted controller string.
         """
 
+        self._ensure_usable()
         self._append(
             "token_reserved",
             {
@@ -771,6 +1140,7 @@ class DurableBrokerJournal:
         )
 
     def settle_tokens(self, reservation_id: str) -> None:
+        self._ensure_usable()
         self._append("token_settled", {"reservation_id": reservation_id})
 
 
@@ -882,3 +1252,156 @@ def observe_unverified_lfrq_header(
     return UnverifiedLFRQHeaderObservation(
         run_id, round_value, stage, total, authority, reservation_id
     )
+
+
+def inspect_complete_lfrq_admission_contract(
+    journal: DurableBrokerJournal,
+    allocation_id: str,
+    request: RetainedLFRQDescriptor,
+    *,
+    binding: BrokerLFRQAdmissionBinding,
+    observed_monotonic_ns: int,
+    boot_session: BrokerBootSessionEvidence,
+) -> ParsedBundle:
+    """Validate every descriptor-bound LFRQ field without granting admission.
+
+    This is the complete *pure* contract a future broker must satisfy after
+    its own source gate and OS-backed peer/installation attestation have
+    passed.  It never writes the journal, chooses a launcher, or returns a
+    launch capability.  In particular, fixture mediation is rejected by the
+    descriptor parser and a broker-shaped receipt remains structurally checked
+    only; an installed non-caller-forgeable attestation verifier is still
+    required before this inspection may be used for production admission.
+    """
+
+    if not isinstance(journal, DurableBrokerJournal):
+        raise BrokerJournalError("complete LFRQ inspection requires a broker journal")
+    allocation_id = _require_hex(allocation_id, "allocation id", size=32)
+    if (
+        type(observed_monotonic_ns) is not int
+        or observed_monotonic_ns < 0
+        or type(boot_session) is not BrokerBootSessionEvidence
+        or not hmac.compare_digest(boot_session.sha256, binding.boot_session_sha256)
+        or not hmac.compare_digest(boot_session.sha256, journal.boot_session_sha256)
+    ):
+        raise BrokerAuthorizationError("broker observation time or boot session is invalid")
+    allocation = journal.allocations.get(allocation_id)
+    if allocation is None or allocation.state != "staged":
+        raise BrokerJournalError("LFRQ allocation is not durably staged")
+    if (
+        observed_monotonic_ns < journal._last_monotonic_ns
+        or observed_monotonic_ns > allocation.allocation.expires_at_ns
+    ):
+        raise BrokerAuthorizationError(
+            "broker LFRQ allocation is expired or monotonic time regressed"
+        )
+    if (
+        getattr(request, "opened_relative_to_private_root", None) is not True
+        or getattr(request, "opened_nofollow", None) is not True
+        or type(getattr(request, "descriptor", None)) is not int
+        or not isinstance(getattr(request, "identity", None), DescriptorRequestIdentity)
+    ):
+        raise BrokerUnavailableError("retained descriptor-native LFRQ proof is unavailable")
+    if binding.run_id != allocation.allocation.run_id:
+        raise BrokerAuthorizationError("broker LFRQ binding does not match allocation run ID")
+    try:
+        parsed = parse_request_bundle_descriptor(
+            request.descriptor,
+            identity=request.identity,
+            expected_uid=journal.installation.broker_uid,
+            run_id=binding.run_id,
+            round=binding.round,
+            stage=binding.stage,
+        )
+    except BundleError as exc:
+        raise BrokerJournalError("complete staged LFRQ is invalid") from exc
+    if (
+        allocation.request_sha256 != parsed.sha256
+        or allocation.total_bytes != request.identity.size
+    ):
+        raise BrokerAuthorizationError("staged LFRQ does not match its durable allocation")
+    reservation = journal.reservations.get(binding.reservation_id)
+    if (
+        reservation is None
+        or reservation.state != "reserved"
+        or reservation.allocation_id != allocation_id
+        or reservation.request_sha256 != parsed.sha256
+        or reservation.tokens != binding.reservation_tokens
+    ):
+        raise BrokerAuthorizationError("LFRQ has no matching durable token reservation")
+
+    task = parsed.sections.get("task")
+    target = task.get("trusted", {}).get("target") if type(task) is dict else None
+    if type(target) is not dict or (
+        target.get("repository"),
+        target.get("issue_number"),
+        target.get("base_sha"),
+    ) != (binding.repository, binding.issue_number, binding.base_sha):
+        raise BrokerAuthorizationError("LFRQ repository, issue, or base SHA binding is invalid")
+    mediation = parsed.sections.get("mediation")
+    if type(mediation) is not dict or (
+        mediation.get("authority"),
+        mediation.get("token_ledger_reservation_id"),
+    ) != ("broker", binding.reservation_id):
+        raise BrokerAuthorizationError("LFRQ broker mediation identity is invalid")
+    if any(
+        type(mediation.get(name)) is not int or mediation[name] > reservation.tokens
+        for name in (
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "input_token_cap",
+            "output_token_cap",
+            "total_token_cap",
+        )
+    ):
+        raise BrokerAuthorizationError("LFRQ mediation usage or caps exceed reserved tokens")
+    values = {
+        "manifest_sha256": _section_sha256(parsed.sections.get("manifest")),
+        "task_sha256": _section_sha256(task),
+        "policy_sha256": _section_sha256(parsed.sections.get("policy")),
+        "check_registry_sha256": _section_sha256(parsed.sections.get("check_registry")),
+        "action_batch_sha256": _section_sha256(parsed.sections.get("action_batch")),
+        "mediation_receipt_sha256": _section_sha256(mediation),
+        "proposed_patch_sha256": _raw_section_sha256(parsed, "proposed_patch"),
+    }
+    expected = {
+        "manifest_sha256": binding.manifest_sha256,
+        "task_sha256": binding.task_sha256,
+        "policy_sha256": binding.policy_sha256,
+        "check_registry_sha256": binding.check_registry_sha256,
+        "action_batch_sha256": binding.action_batch_sha256,
+        "mediation_receipt_sha256": binding.mediation_receipt_sha256,
+        "proposed_patch_sha256": binding.proposed_patch_sha256,
+    }
+    if any(not _same_optional_digest(values[name], expected[name]) for name in expected):
+        raise BrokerAuthorizationError(
+            "LFRQ section identities do not match durable broker binding"
+        )
+    return parsed
+
+
+def _section_sha256(value: Any) -> str:
+    try:
+        return hashlib.sha256(_canonical_json(value)).hexdigest()
+    except BrokerJournalError:
+        raise
+    except Exception as exc:  # defensive boundary around untrusted parsed JSON
+        raise BrokerJournalError("LFRQ section cannot be canonically bound") from exc
+
+
+def _raw_section_sha256(parsed: ParsedBundle, section_type: str) -> str | None:
+    section = parsed.raw_sections.get(section_type)
+    return None if section is None else section.sha256
+
+
+def _same_optional_digest(observed: object, expected: object) -> bool:
+    """Constant-time compare only two same-typed, validated digest values."""
+
+    if observed is None or expected is None:
+        return observed is None and expected is None
+    if type(observed) is not str or type(expected) is not str:
+        return False
+    return hmac.compare_digest(observed, expected)

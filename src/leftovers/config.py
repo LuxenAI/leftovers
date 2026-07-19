@@ -834,6 +834,13 @@ def _validate(config: AppConfig) -> None:
         and 30 <= strict.wall_time_seconds <= 3_600
     ):
         raise ConfigError("strict_vm hardware limits are outside launcher bounds")
+    if strict.enabled and (
+        strict.cpu_count,
+        strict.memory_bytes,
+        strict.scratch_bytes,
+        strict.wall_time_seconds,
+    ) != (2, 2_147_483_648, 2_147_483_648, 1_800):
+        raise ConfigError("enabled strict_vm requires the exact installed resource profile")
     if not (
         1 <= strict.max_rounds <= 32
         and 1 <= strict.max_actions_per_round <= 32

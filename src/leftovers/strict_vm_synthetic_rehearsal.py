@@ -39,6 +39,11 @@ from .model_mediator import (
     canonical_json_bytes,
 )
 from .strict_vm_broker import STRICT_VM_BROKER_ENABLED
+from .strict_vm_broker_installation import (
+    STRICT_VM_BROKER_INSTALLATION_ENABLED,
+    STRICT_VM_BROKER_NATIVE_TRUST_ADAPTER_VERIFIED,
+)
+from .strict_vm_broker_journal import STRICT_VM_BROKER_DESCRIPTOR_ADMISSION_ENABLED
 from .strict_vm_broker_service import (
     STRICT_VM_BROKER_CODE_SIGNATURE_EVIDENCE_VERIFIED,
     STRICT_VM_BROKER_DEDICATED_UID_EVIDENCE_VERIFIED,
@@ -59,6 +64,7 @@ from .strict_vm_cycle import (
     patch_sha256,
     start_offline_cycle,
 )
+from .strict_vm_os_executor import STRICT_VM_OS_EXECUTOR_ENABLED
 from .strict_vm_poststop import (
     STRICT_VM_POSTSTOP_ENABLED,
     OfflineCheckSpec,
@@ -529,11 +535,15 @@ def _require_all_production_authorities_disabled() -> None:
         ZERO_TOOL_CONFIGURATION_PROVEN,
         PRODUCTION_MEDIATION_ENABLED,
         STRICT_VM_BROKER_ENABLED,
+        STRICT_VM_BROKER_DESCRIPTOR_ADMISSION_ENABLED,
         STRICT_VM_BROKER_SERVICE_ENABLED,
         STRICT_VM_BROKER_DEDICATED_UID_EVIDENCE_VERIFIED,
         STRICT_VM_BROKER_CODE_SIGNATURE_EVIDENCE_VERIFIED,
         STRICT_VM_BROKER_LIVE_CLEANUP_EVIDENCE_VERIFIED,
+        STRICT_VM_BROKER_INSTALLATION_ENABLED,
+        STRICT_VM_BROKER_NATIVE_TRUST_ADAPTER_VERIFIED,
         STRICT_VM_EXECUTION_ENABLED,
+        STRICT_VM_OS_EXECUTOR_ENABLED,
         STRICT_VM_POSTSTOP_ENABLED,
         STRICT_VM_WHOLE_CYCLE_CAPABILITY,
     )

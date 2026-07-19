@@ -44,6 +44,7 @@ from leftovers.vm_bundle import (
     MIN_SCRATCH_BYTES,
     BundleError,
     authorize_mediation_result,
+    fixture_vm_bundle_capability,
 )
 
 
@@ -354,7 +355,7 @@ class StrictVMOneEpochControllerTests(unittest.TestCase):
             curated_checks=(),
             token_ledger_reservation_id="d" * 64,
             provider_usage_evidence_sha256=FIXTURE_USAGE_EVIDENCE_SHA256,
-            fixture=True,
+            fixture_capability=fixture_vm_bundle_capability(),
         )
 
     def test_success_uses_fixed_empty_environment_argv_and_exact_cleanup(self) -> None:
@@ -380,6 +381,10 @@ class StrictVMOneEpochControllerTests(unittest.TestCase):
             mock.patch(
                 "leftovers.strict_vm_runner.verify_static_readiness",
                 side_effect=AssertionError("readiness must not run"),
+            ),
+            mock.patch(
+                "leftovers.strict_vm_runner.fixture_vm_bundle_capability",
+                side_effect=AssertionError("fixture capability must not be requested"),
             ),
             self.assertRaisesRegex(StrictVMRunnerError, "hard-disabled"),
         ):
@@ -424,6 +429,20 @@ class StrictVMOneEpochControllerTests(unittest.TestCase):
                 mock.call(12345, signal.SIGTERM),
                 mock.call(12345, 0),
             ],
+        )
+
+    def test_stop_group_treats_darwin_eperm_as_exit_only_after_reaping_leader(self) -> None:
+        process = mock.Mock()
+        process.pid = 23456
+        process.poll.side_effect = (None, 0)
+        with mock.patch(
+            "leftovers.strict_vm_runner.os.killpg",
+            side_effect=(None, PermissionError("leader exited")),
+        ) as killpg:
+            self.assertTrue(_stop_group(process))
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(23456, 0), mock.call(23456, signal.SIGTERM)],
         )
 
     def test_output_flood_retains_the_lease_after_launch(self) -> None:

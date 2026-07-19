@@ -108,6 +108,32 @@ class StrictVMSyntheticRehearsalTests(unittest.TestCase):
             self.assertFalse(evidence.provider_called)
             self.assertEqual(list(root.iterdir()), [])
 
+    def test_os_executor_gate_is_part_of_the_no_authority_rehearsal(self) -> None:
+        with (
+            mock.patch.object(synthetic, "STRICT_VM_OS_EXECUTOR_ENABLED", True),
+            self.assertRaisesRegex(SyntheticRehearsalError, "authority gate"),
+        ):
+            synthetic._require_all_production_authorities_disabled()
+
+    def test_broker_installation_gates_are_part_of_the_no_authority_rehearsal(self) -> None:
+        for gate in (
+            "STRICT_VM_BROKER_INSTALLATION_ENABLED",
+            "STRICT_VM_BROKER_NATIVE_TRUST_ADAPTER_VERIFIED",
+        ):
+            with (
+                self.subTest(gate=gate),
+                mock.patch.object(synthetic, gate, True),
+                self.assertRaisesRegex(SyntheticRehearsalError, "authority gate"),
+            ):
+                synthetic._require_all_production_authorities_disabled()
+
+    def test_descriptor_admission_gate_is_part_of_the_no_authority_rehearsal(self) -> None:
+        with (
+            mock.patch.object(synthetic, "STRICT_VM_BROKER_DESCRIPTOR_ADMISSION_ENABLED", True),
+            self.assertRaisesRegex(SyntheticRehearsalError, "authority gate"),
+        ):
+            synthetic._require_all_production_authorities_disabled()
+
     def test_public_broker_entry_rejects_before_any_dependency_is_inspected(self) -> None:
         with self.assertRaisesRegex(BrokerUnavailableError, "source-disabled"):
             StrictVMBrokerServiceCore(

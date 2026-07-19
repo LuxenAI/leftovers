@@ -329,6 +329,11 @@ class StrictVMBrokerServiceTests(unittest.TestCase):
         self.assertFalse(STRICT_VM_BROKER_DEDICATED_UID_EVIDENCE_VERIFIED)
         self.assertFalse(STRICT_VM_BROKER_CODE_SIGNATURE_EVIDENCE_VERIFIED)
         self.assertFalse(STRICT_VM_BROKER_LIVE_CLEANUP_EVIDENCE_VERIFIED)
+        policy = FixedBrokerResourcePolicy()
+        self.assertEqual(policy.virtual_cpus, 2)
+        self.assertEqual(policy.memory_bytes, 2 * 1_024 * 1_024 * 1_024)
+        self.assertEqual(policy.scratch_bytes, 2 * 1_024 * 1_024 * 1_024)
+        self.assertEqual(policy.wall_clock_seconds, 30 * 60)
         with self.assertRaises(BrokerServiceError):
             FixedBrokerResourcePolicy(memory_bytes=1)
         core = FixtureStrictVMBrokerServiceCore(

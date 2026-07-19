@@ -41,6 +41,17 @@ and the validation of externally collected evidence.
    boundary that denies both network access and access outside the verification clone. That
    boundary must also prove its process unit is empty after every check: process-group cleanup
    alone cannot observe a detached child that closes the capture pipes before its parent exits.
+   `leftovers.strict_vm_os_executor` now fixes the only contemplated Linux proof contract: a
+   controller/service-owned, **non-delegated cgroup v2** identity binds the run, boot identity,
+   cgroup mount/inode, and creation-time service ID; fixed wall/CPU/memory/PID/output caps are
+   hashed into the evidence. The privileged adapter must show a non-delegated domain cgroup, all
+   required controllers and caps, network/filesystem isolation, blocked workload cgroup migration,
+   stop plus `cgroup.kill`, then two direct observations at least 10 ms apart of both
+   `cgroup.events` (`populated 0`, with the raw-read digest bound) and `cgroup.procs` (empty) before
+   it reaps the leader, capture pipes, and unit. `setsid`, parent exit, process-group cleanup, or
+   pipe closure alone are explicitly insufficient. The contract ships no Linux/service-manager
+   implementation and its collection entry point is source-disabled before platform access; pure
+   fixture evidence has no publisher authority.
 7. The host must observe the planned base SHA during re-verification and recheck it immediately
    before handoff. Any moved base, patch drift, policy-digest mismatch, failed/timed/truncated check,
    or unresolved review finding is rejected.
@@ -54,10 +65,33 @@ caller-constructible Python data and must never be treated as production authori
 evidence. `publisher.py` remains separately responsible for its own current authorization and
 remote preflight checks.
 
-The current `vm_bundle` fixture authorization and low-level `fixture_authorization` flag are also
-caller-constructible test inputs. The source-disabled epoch rejects before using them, but they must
-be replaced by a separate non-production capability/type before any execution gate can be reviewed
-for activation; a Boolean fixture marker is not broker authority.
+`vm_bundle` fixture serialization and semantic validation require its identity-scoped singleton
+`FixtureVMBundleCapability`; direct construction with another identity and construction of a
+fixture authorization envelope fail closed. The clearly named fixture factory remains callable by
+Python tests and is therefore **not authority**. This is only an accidental-misuse guard around
+offline fixtures: the strict epoch remains source-disabled and broker-attestation verification is
+still unimplemented.
+
+## Descriptor-native broker admission contract
+
+`parse_request_bundle_descriptor()` is a bounded, pathname-free LFRQ parser for a future dedicated
+broker. The broker must retain an `O_NOFOLLOW`, descriptor-relative FD and its complete
+device/inode/owner/mode/link/size/mtime/ctime snapshot; the parser requires `FD_CLOEXEC`, checks
+the fixed `0400` regular-file contract, streams every bounded section, and rechecks that complete
+identity before and after parsing. It rejects fixture mediation outright, even when fixture bytes
+are otherwise valid.
+
+`inspect_complete_lfrq_admission_contract()` adds the future broker's durable bindings: the exact
+run/round/stage, repository/issue/base SHA from the trusted task target, canonical manifest/task/
+policy/check-registry/action/mediation digests, exact proposed-patch identity, and a still-reserved
+token record (including its exact token count) bound to the same staged request digest and
+allocation. It checks that receipt usage and every token cap fit that reservation, and requires a
+typed broker-observed monotonic timestamp plus boot-session digest; expired allocations fail.
+The typed evidence must exactly match the journal's durably recorded active boot session; rollover
+quarantines prior allocations. It returns only parsed data, never a launcher plan. The public journal admission entry remains
+source-disabled **before any descriptor access** because the required root-owned launchd/peer
+attestation and atomic staged-plus-token-reservation commit are not implemented. These pure
+contracts are therefore reviewable failure-mode evidence, not a production authorization path.
 
 ## Synthetic wiring rehearsal
 
@@ -100,7 +134,8 @@ This verifier does **not** complete a production backend. Before any gate could 
 activation, Leftovers still needs a broker-owned strict-VM run directory, an authenticated
 credential-isolating no-tool model mediator, a compiled guest action interpreter, trusted
 host-side patch application/check execution, a platform-reviewed network- and filesystem-isolated
-check executor with descendant-emptiness evidence, an exclusive service-owned verification mount
+check executor that implements and live-attests the cgroup-v2 descendant-empty contract, an
+exclusive service-owned verification mount
 whose cleanup cannot race an inode replacement, durable cleanup recovery, and live adversarial
 escape/resource/cleanup evidence with remote writes disabled. Even with those proofs, it must not
 claim absolute escape-proofing.

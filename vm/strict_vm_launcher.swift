@@ -11,6 +11,10 @@ private let gib: UInt64 = 1_073_741_824
 private let hostFreeSpaceReserve = gib
 private let maximumHostFileDescriptors: rlim_t = 256
 private let maximumScratchPreparationSeconds = 60.0
+private let productionCPUCount = 2
+private let productionMemoryBytes = 2 * gib
+private let productionScratchBytes = 2 * gib
+private let productionWallTimeSeconds = 30 * 60
 private let fixedKernelCommandLine = [
     "console=hvc0",
     "rdinit=/init",
@@ -875,7 +879,7 @@ private func revalidateScratchAfterStop(_ run: PreparedRun) throws {
     try revalidateScratch(run.scratch, role: "after guest stop", runDirectory: runDirectory, requireSync: true)
 }
 
-private func validateManifestValues(_ manifest: Manifest) throws {
+private func validateManifestValues(_ manifest: Manifest, mode: String) throws {
     guard manifest.schemaVersion == manifestSchemaVersion else {
         throw LaunchFailure(code: "schema_version", detail: "unsupported manifest schema")
     }
@@ -900,6 +904,24 @@ private func validateManifestValues(_ manifest: Manifest) throws {
           manifest.scratchDisk.sizeBytes % mib == 0
     else {
         throw LaunchFailure(code: "scratch_limit", detail: "scratch size must be 64 MiB through 4 GiB and MiB-aligned")
+    }
+    if mode == "run" {
+        guard manifest.requestDisk != nil else {
+            throw LaunchFailure(
+                code: "request_required",
+                detail: "run mode requires the sealed read-only request disk"
+            )
+        }
+        guard manifest.cpuCount == productionCPUCount,
+              manifest.memoryBytes == productionMemoryBytes,
+              manifest.scratchDisk.sizeBytes == productionScratchBytes,
+              manifest.wallTimeSeconds == productionWallTimeSeconds
+        else {
+            throw LaunchFailure(
+                code: "production_resource_profile",
+                detail: "run mode requires the exact installed resource profile"
+            )
+        }
     }
 }
 
@@ -1073,9 +1095,13 @@ private func createReservedScratch(
     }
 }
 
-private func prepare(_ manifest: Manifest, cancellation: SignalCancellation) throws -> PreparedRun {
+private func prepare(
+    _ manifest: Manifest,
+    mode: String,
+    cancellation: SignalCancellation
+) throws -> PreparedRun {
     try cancellation.checkpoint("manifest preparation")
-    try validateManifestValues(manifest)
+    try validateManifestValues(manifest, mode: mode)
     let bootArtifactDirectory = try checkedAbsoluteURL(
         manifest.bootArtifactDirectory,
         role: "boot_artifact_directory"
@@ -1476,7 +1502,7 @@ private func main() -> Int32 {
         manifest = loaded.manifest
         manifestSHA256 = loaded.sha256
         try cancellation.checkpoint("manifest loading")
-        let run = try prepare(loaded.manifest, cancellation: cancellation)
+        let run = try prepare(loaded.manifest, mode: mode, cancellation: cancellation)
         prepared = run
         try cancellation.checkpoint("VM configuration")
         let bundle = try buildConfiguration(run)

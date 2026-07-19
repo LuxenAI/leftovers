@@ -99,6 +99,20 @@ class StrictVMLauncherSourceTests(unittest.TestCase):
         ):
             self.assertIn(token, self.source)
 
+    def test_run_mode_requires_request_disk_and_exact_installed_resources(self) -> None:
+        for token in (
+            "private let productionCPUCount = 2",
+            "private let productionMemoryBytes = 2 * gib",
+            "private let productionScratchBytes = 2 * gib",
+            "private let productionWallTimeSeconds = 30 * 60",
+            'if mode == "run"',
+            "guard manifest.requestDisk != nil",
+            'code: "request_required"',
+            'code: "production_resource_profile"',
+            "try validateManifestValues(manifest, mode: mode)",
+        ):
+            self.assertIn(token, self.source)
+
     def test_manifest_parser_requires_one_canonical_json_object(self) -> None:
         self.assertIn("JSONSerialization.data(", self.source)
         self.assertIn(".sortedKeys, .withoutEscapingSlashes", self.source)
@@ -233,10 +247,14 @@ class StrictVMLauncherBehaviorTests(unittest.TestCase):
         return self.invoke_launcher(path)
 
     def invoke_launcher(
-        self, path: Path, *, environment: dict[str, str] | None = None
+        self,
+        path: Path,
+        *,
+        environment: dict[str, str] | None = None,
+        mode: str = "--check",
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         result = subprocess.run(
-            [str(self.binary), "--check", str(path)],
+            [str(self.binary), mode, str(path)],
             check=False,
             cwd=ROOT,
             capture_output=True,
@@ -266,6 +284,42 @@ class StrictVMLauncherBehaviorTests(unittest.TestCase):
             },
         )
         return result, receipt
+
+    def test_run_mode_rejects_missing_request_before_artifact_or_scratch_access(self) -> None:
+        manifest = self.minimal_manifest()
+        run = Path(str(manifest["run_directory"]))
+        run.mkdir(parents=True, mode=0o700)
+        path = run / "manifest-run-missing-request.json"
+        path.write_text(
+            json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8"
+        )
+        path.chmod(0o400)
+
+        result, receipt = self.invoke_launcher(path, mode="--run")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(receipt["error_code"], "request_required", result.stderr)
+        self.assertFalse((run / "scratch.raw").exists())
+
+    def test_run_mode_rejects_noninstalled_resource_profile_before_path_access(self) -> None:
+        manifest = self.minimal_manifest()
+        manifest["request_disk"] = {
+            "path": str(Path(str(manifest["run_directory"])) / "request.raw"),
+            "sha256": "a" * 64,
+        }
+        run = Path(str(manifest["run_directory"]))
+        run.mkdir(parents=True, mode=0o700)
+        path = run / "manifest-run-resources.json"
+        path.write_text(
+            json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8"
+        )
+        path.chmod(0o400)
+
+        result, receipt = self.invoke_launcher(path, mode="--run")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(receipt["error_code"], "production_resource_profile", result.stderr)
+        self.assertFalse((run / "scratch.raw").exists())
 
     def minimal_manifest(self) -> dict[str, object]:
         case = self.work / self._testMethodName

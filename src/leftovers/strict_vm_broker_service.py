@@ -175,7 +175,7 @@ class FixedBrokerResourcePolicy:
 
     memory_bytes: int = 2 * 1_024 * 1_024 * 1_024
     virtual_cpus: int = 2
-    wall_clock_seconds: int = 20 * 60
+    wall_clock_seconds: int = 30 * 60
     request_bytes: int = 256 * 1_024 * 1_024
     scratch_bytes: int = 2 * 1_024 * 1_024 * 1_024
 
@@ -183,7 +183,7 @@ class FixedBrokerResourcePolicy:
         if (
             self.memory_bytes != 2 * 1_024 * 1_024 * 1_024
             or self.virtual_cpus != 2
-            or self.wall_clock_seconds != 20 * 60
+            or self.wall_clock_seconds != 30 * 60
             or self.request_bytes != 256 * 1_024 * 1_024
             or self.scratch_bytes != 2 * 1_024 * 1_024 * 1_024
         ):

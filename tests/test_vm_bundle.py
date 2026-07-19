@@ -30,6 +30,7 @@ class VMBundleTests(unittest.TestCase):
         self.request = self.root / "request.lfrq"
         self.scratch = self.root / "scratch.lfrs"
         self.binding = {"run_id": "a" * 32, "round": 7, "stage": "implementation"}
+        self.fixture_capability = bundle.fixture_vm_bundle_capability()
         self.source = self.root / "capsule.bin"
         self.source.write_bytes(b"capsule")
         os.chmod(self.source, 0o600)
@@ -148,7 +149,7 @@ class VMBundleTests(unittest.TestCase):
         return bundle.build_request_bundle(
             self.request,
             sections=self.request_sections(**extra),
-            fixture_authorization=True,
+            fixture_capability=self.fixture_capability,
             **self.binding,
         )
 
@@ -205,7 +206,7 @@ class VMBundleTests(unittest.TestCase):
                 action_batch=self.action_batch(stage, actions),
                 **extra,
             ),
-            fixture_authorization=True,
+            fixture_capability=self.fixture_capability,
         )
 
     @staticmethod
@@ -383,13 +384,24 @@ class VMBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(bundle.BundleError, "unsafe"):
             self.build_request()
 
-    def test_raw_action_data_without_explicit_fixture_authorization_is_rejected(self) -> None:
-        with self.assertRaisesRegex(bundle.BundleError, "fixture mediation authorization"):
+    def test_raw_action_data_without_explicit_fixture_capability_is_rejected(self) -> None:
+        with self.assertRaisesRegex(bundle.BundleError, "fixture VM bundle capability"):
             bundle.build_request_bundle(
                 self.request,
                 sections=self.request_sections(),
+                fixture_capability=object(),  # type: ignore[arg-type]
                 **self.binding,
             )
+
+    def test_fixture_capability_and_authorization_envelope_are_not_publicly_constructible(
+        self,
+    ) -> None:
+        self.assertIs(self.fixture_capability, bundle.fixture_vm_bundle_capability())
+        with self.assertRaisesRegex(bundle.BundleError, "not constructible"):
+            bundle.FixtureVMBundleCapability(object())
+        self.assertFalse(hasattr(bundle, "MediationAuthorization"))
+        with self.assertRaisesRegex(bundle.BundleError, "not constructible"):
+            bundle._FixtureMediationAuthorization(object(), {}, {}, {}, None, {})
 
     def test_receipt_and_check_registry_tampering_fail_closed(self) -> None:
         patch = b"diff --git a/a b/a\n"
@@ -412,7 +424,7 @@ class VMBundleTests(unittest.TestCase):
             bundle.build_request_bundle(
                 self.request,
                 sections=sections,
-                fixture_authorization=True,
+                fixture_capability=self.fixture_capability,
                 **self.binding,
             )
 
@@ -443,7 +455,7 @@ class VMBundleTests(unittest.TestCase):
             bundle.build_request_bundle(
                 self.root / "unknown-check.lfrq",
                 sections=unknown,
-                fixture_authorization=True,
+                fixture_capability=self.fixture_capability,
                 **{**self.binding, "stage": "final_verify"},
             )
 
@@ -459,9 +471,36 @@ class VMBundleTests(unittest.TestCase):
             bundle.build_request_bundle(
                 self.root / "altered-argv.lfrq",
                 sections=altered,
-                fixture_authorization=True,
+                fixture_capability=self.fixture_capability,
                 **{**self.binding, "stage": "final_verify"},
             )
+
+    def test_receipt_usage_limits_and_timestamps_are_revalidated_from_wire_json(self) -> None:
+        for label, mutate in (
+            ("nonexact", lambda receipt: receipt.__setitem__("exact_usage", False)),
+            ("total", lambda receipt: receipt.__setitem__("total_tokens", 3)),
+            ("cache", lambda receipt: receipt.__setitem__("cached_input_tokens", 2)),
+            (
+                "deadline",
+                lambda receipt: receipt.__setitem__("finished_at", receipt["deadline_at"]),
+            ),
+            (
+                "timestamp",
+                lambda receipt: receipt.__setitem__("started_at", "2029-01-01T00:00:00Z"),
+            ),
+        ):
+            with self.subTest(label=label):
+                sections = self.request_sections()
+                receipt = sections["mediation"]
+                assert isinstance(receipt, dict)
+                mutate(receipt)
+                with self.assertRaisesRegex(bundle.BundleError, "mediation receipt"):
+                    bundle.build_request_bundle(
+                        self.root / f"wire-{label}.lfrq",
+                        sections=sections,
+                        fixture_capability=self.fixture_capability,
+                        **self.binding,
+                    )
 
     def test_controller_authorization_rebuilds_and_binds_a_fixture_result(self) -> None:
         limits = MediationLimits(
@@ -509,7 +548,7 @@ class VMBundleTests(unittest.TestCase):
             curated_checks=(),
             token_ledger_reservation_id="f" * 64,
             provider_usage_evidence_sha256=bundle.FIXTURE_USAGE_EVIDENCE_SHA256,
-            fixture=True,
+            fixture_capability=self.fixture_capability,
         )
         parsed = bundle.build_authorized_request_bundle(
             self.request,
@@ -521,13 +560,14 @@ class VMBundleTests(unittest.TestCase):
             task={"issue": 42},
             authorization=authorization,
             prior_observations={"note": "bounded fixture observation"},
+            fixture_capability=self.fixture_capability,
         )
         mediation = parsed.sections["mediation"]
         assert isinstance(mediation, dict)
         self.assertEqual(mediation["action_batch_sha256"], result.receipt.action_batch_sha256)
         self.assertEqual(parsed.sections["prior_obs"], {"note": "bounded fixture observation"})
         self.assertNotIn("prior_observations", parsed.sections)
-        with self.assertRaisesRegex(bundle.BundleError, "broker attestation"):
+        with self.assertRaisesRegex(bundle.BundleError, "deterministic usage evidence"):
             bundle.authorize_mediation_result(
                 request,
                 result,
@@ -542,6 +582,7 @@ class VMBundleTests(unittest.TestCase):
                 curated_checks=(),
                 token_ledger_reservation_id="f" * 64,
                 provider_usage_evidence_sha256="a" * 64,
+                fixture_capability=self.fixture_capability,
             )
 
     def test_request_rejects_size_hash_gaps_unknown_and_private_mode(self) -> None:
@@ -550,7 +591,9 @@ class VMBundleTests(unittest.TestCase):
         os.truncate(self.request, self.request.stat().st_size - bundle.ALIGNMENT)
         os.chmod(self.request, 0o400)
         with self.assertRaisesRegex(bundle.BundleError, "size|fields"):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
 
         self.request.unlink()
         self.build_request()
@@ -559,18 +602,24 @@ class VMBundleTests(unittest.TestCase):
         self.assertTrue(gaps)
         self._write_at(self.request, gaps[0][0], b"x", 0o400)
         with self.assertRaisesRegex(bundle.BundleError, "nonzero"):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
 
         self.request.unlink()
         self.build_request()
         location = bundle._PREFIX.size
         self._write_at(self.request, location, b"unknown" + b"\0" * 9, 0o400)
         with self.assertRaisesRegex(bundle.BundleError, "unknown"):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
 
         os.chmod(self.request, 0o640)
         with self.assertRaisesRegex(bundle.BundleError, "mode"):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
 
     def test_request_rejects_noncanonical_table_and_json(self) -> None:
         self.build_request()
@@ -586,7 +635,9 @@ class VMBundleTests(unittest.TestCase):
         self._write_at(self.request, first, header[second : second + bundle._SECTION.size], 0o400)
         self._write_at(self.request, second, header[first : first + bundle._SECTION.size], 0o400)
         with self.assertRaisesRegex(bundle.BundleError, "canonical order"):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
         with self.assertRaisesRegex(bundle.BundleError, "signed 64-bit"):
             bundle._canonical_json({"n": 2**63}, 64)
         with self.assertRaisesRegex(bundle.BundleError, "UTF-8 JSON"):
@@ -597,7 +648,9 @@ class VMBundleTests(unittest.TestCase):
         linked = self.root / "linked"
         os.link(self.request, linked)
         with self.assertRaisesRegex(bundle.BundleError, "links"):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
         linked.unlink()
 
         original_identity = bundle._identity
@@ -624,7 +677,9 @@ class VMBundleTests(unittest.TestCase):
             mock.patch.object(bundle, "_identity", side_effect=changing_identity),
             self.assertRaisesRegex(bundle.BundleError, "identity changed"),
         ):
-            bundle.parse_request_bundle(self.request, fixture_authorization=True, **self.binding)
+            bundle.parse_request_bundle(
+                self.request, fixture_capability=self.fixture_capability, **self.binding
+            )
 
     def test_tail_is_fixed_scratch_with_verified_footer_and_region_digest(self) -> None:
         parsed = self.build_result()
@@ -712,6 +767,7 @@ class VMBundleTests(unittest.TestCase):
             request,
             guest_policy_sha256="b" * 64,
             max_observation_bytes=1024,
+            fixture_capability=self.fixture_capability,
         )
         self.assertEqual(verified.status, "complete")
         self.assertEqual(
@@ -737,6 +793,7 @@ class VMBundleTests(unittest.TestCase):
                 request,
                 guest_policy_sha256="b" * 64,
                 max_observation_bytes=1024,
+                fixture_capability=self.fixture_capability,
             )
         with self.assertRaisesRegex(bundle.BundleError, "observation byte cap"):
             bundle.validate_guest_result(
@@ -744,6 +801,7 @@ class VMBundleTests(unittest.TestCase):
                 request,
                 guest_policy_sha256="b" * 64,
                 max_observation_bytes=1,
+                fixture_capability=self.fixture_capability,
             )
 
     def test_guest_result_rejects_patch_mismatch_duplicate_action_ids_and_failed_final_check(
@@ -768,6 +826,7 @@ class VMBundleTests(unittest.TestCase):
                 request,
                 guest_policy_sha256="b" * 64,
                 max_observation_bytes=1024,
+                fixture_capability=self.fixture_capability,
             )
 
         self.request.unlink()
@@ -790,6 +849,7 @@ class VMBundleTests(unittest.TestCase):
                 final_request,
                 guest_policy_sha256="b" * 64,
                 max_observation_bytes=1024,
+                fixture_capability=self.fixture_capability,
             )
 
     def test_read_only_and_final_verify_stages_cannot_return_model_patches(self) -> None:
@@ -823,7 +883,7 @@ class VMBundleTests(unittest.TestCase):
                     policy=final_policy,
                     action_batch=final_actions,
                 ),
-                fixture_authorization=True,
+                fixture_capability=self.fixture_capability,
                 **{**self.binding, "stage": "final_verify"},
             )
         with self.assertRaisesRegex(bundle.BundleError, "strict mediated action grammar"):
@@ -840,7 +900,7 @@ class VMBundleTests(unittest.TestCase):
                         ],
                     ),
                 ),
-                fixture_authorization=True,
+                fixture_capability=self.fixture_capability,
                 **{**self.binding, "stage": "final_verify"},
             )
         bundle.build_request_bundle(
@@ -850,7 +910,7 @@ class VMBundleTests(unittest.TestCase):
                 policy=final_policy,
                 action_batch=final_actions,
             ),
-            fixture_authorization=True,
+            fixture_capability=self.fixture_capability,
             **{**self.binding, "stage": "final_verify"},
         )
 

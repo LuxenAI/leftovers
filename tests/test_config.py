@@ -167,6 +167,25 @@ class ConfigTests(unittest.TestCase):
             ):
                 load_config(self.write(source.replace(original, replacement)))
 
+    def test_enabled_strict_vm_requires_the_exact_installed_resource_profile(self) -> None:
+        source = strict_vm_config().replace(
+            'guest_policy_path = "/trusted/boot/guest-policy.json"',
+            'guest_policy_path = "/trusted/boot/guest-policy.json"\n'
+            "cpu_count = 2\nmemory_bytes = 2147483648\n"
+            "scratch_bytes = 2147483648\nwall_time_seconds = 1800",
+        )
+        for original, replacement in (
+            ("cpu_count = 2", "cpu_count = 1"),
+            ("memory_bytes = 2147483648", "memory_bytes = 1073741824"),
+            ("scratch_bytes = 2147483648", "scratch_bytes = 1073741824"),
+            ("wall_time_seconds = 1800", "wall_time_seconds = 900"),
+        ):
+            with (
+                self.subTest(replacement=replacement),
+                self.assertRaisesRegex(ConfigError, "exact installed resource profile"),
+            ):
+                load_config(self.write(source.replace(original, replacement)))
+
     def test_mediator_reasoning_effort_matches_runtime_grammar(self) -> None:
         unsafe = strict_vm_config().replace(
             'reasoning_effort = "high"', 'reasoning_effort = "xhigh"'

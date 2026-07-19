@@ -78,7 +78,7 @@ that the launcher, group, and other users cannot rewrite; only a binary compiled
   },
   "scratch_disk": {
     "path": "/private/var/leftovers/runs/2026-07-18-a1/scratch.raw",
-    "size_bytes": 1073741824
+    "size_bytes": 2147483648
   },
   "cpu_count": 2,
   "memory_bytes": 2147483648,
@@ -86,8 +86,11 @@ that the launcher, group, and other users cannot rewrite; only a binary compiled
 }
 ```
 
-`request_disk` is optional. All unknown fields are rejected recursively, including a seemingly
-benign extra field. There is intentionally no compatibility escape hatch.
+`request_disk` is optional only for `--check`. `--run` requires it and independently requires the
+exact installed resource profile shown above: 2 vCPUs, 2 GiB memory, 2 GiB scratch, and 1,800
+seconds. This keeps a controller-supplied or stale manifest from widening the broker's fixed policy.
+All unknown fields are rejected recursively, including a seemingly benign extra field. There is
+intentionally no compatibility escape hatch.
 
 The only supported invocations are:
 

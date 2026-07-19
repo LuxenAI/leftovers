@@ -10,6 +10,7 @@ written last by the guest and is parsed with ``pread`` only after shutdown.
 from __future__ import annotations
 
 import codecs
+import fcntl
 import hashlib
 import json
 import os
@@ -31,9 +32,11 @@ from .model_mediator import (
     MediationResult,
     MediationStage,
     MediatorValidationError,
+    ReportedTokenCounts,
     RunCheckAction,
     validate_action_batch,
     validate_mediation_result,
+    validate_reported_token_counts,
 )
 
 
@@ -162,7 +165,6 @@ class ParsedBundle:
     sections: dict[str, Any]
     raw_sections: dict[str, SectionReference]
     sha256: str
-    fixture_authorization: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,22 +224,65 @@ class CuratedCheck:
     argv: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class MediationAuthorization:
-    """Controller-issued, digest-bound data accepted by the strict VM path.
+class FixtureVMBundleCapability:
+    """Singleton capability for explicitly non-production LFRQ fixtures.
 
-    ``fixture`` is intentionally explicit.  Fixture authorizations are for
-    offline protocol tests only and the production controller rejects them.
-    A future broker authorization requires an independently reviewed issuer;
-    this data shape alone is not a cryptographic attestation.
+    It is intentionally not a boolean switch: construction requires this
+    module's private identity, and production entry points remain disabled.
     """
 
+    __slots__ = ("_identity",)
+
+    def __init__(self, identity: object) -> None:
+        if identity is not _FIXTURE_VM_BUNDLE_CAPABILITY_IDENTITY:
+            raise BundleError("fixture VM bundle capability is not constructible")
+        self._identity = identity
+
+
+_FIXTURE_VM_BUNDLE_CAPABILITY_IDENTITY = object()
+_FIXTURE_VM_BUNDLE_CAPABILITY = FixtureVMBundleCapability(_FIXTURE_VM_BUNDLE_CAPABILITY_IDENTITY)
+
+
+def fixture_vm_bundle_capability() -> FixtureVMBundleCapability:
+    """Return the singleton capability for clearly labeled fixture-only calls."""
+
+    return _FIXTURE_VM_BUNDLE_CAPABILITY
+
+
+@dataclass(frozen=True, init=False)
+class _FixtureMediationAuthorization:
+    """Module-issued fixture envelope, never a broker authorization."""
+
+    identity: object
     policy: dict[str, Any]
     check_registry: dict[str, Any]
     action_batch: dict[str, Any]
     proposed_patch: bytes | None
     receipt: dict[str, Any]
-    fixture: bool
+
+    def __init__(
+        self,
+        identity: object,
+        policy: dict[str, Any],
+        check_registry: dict[str, Any],
+        action_batch: dict[str, Any],
+        proposed_patch: bytes | None,
+        receipt: dict[str, Any],
+    ) -> None:
+        if identity is not _FIXTURE_VM_BUNDLE_CAPABILITY_IDENTITY:
+            raise BundleError("fixture mediation authorization is not constructible")
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "policy", policy)
+        object.__setattr__(self, "check_registry", check_registry)
+        object.__setattr__(self, "action_batch", action_batch)
+        object.__setattr__(self, "proposed_patch", proposed_patch)
+        object.__setattr__(self, "receipt", receipt)
+
+
+def _require_fixture_capability(capability: object) -> FixtureVMBundleCapability:
+    if capability is not _FIXTURE_VM_BUNDLE_CAPABILITY:
+        raise BundleError("explicit fixture VM bundle capability is required")
+    return _FIXTURE_VM_BUNDLE_CAPABILITY
 
 
 @dataclass(frozen=True)
@@ -254,7 +299,20 @@ class BrokerSealedAuthorization:
 
 
 @dataclass(frozen=True)
-class _Identity:
+class DescriptorRequestIdentity:
+    """Stable identity of a broker-owned, already-open LFRQ descriptor.
+
+    This value intentionally carries no pathname.  A future dedicated broker
+    must open the file relative to its private directory using ``O_NOFOLLOW``
+    and retain that descriptor.  The parser below compares this complete
+    identity before and after every bounded read, so a truncate, replacement,
+    hard-link, ownership, mode, or timestamp change is a failure rather than
+    an opportunity to reinterpret controller bytes.
+
+    It is a structural observation, not broker authority: only the
+    source-disabled broker admission path may use it to consider a launch.
+    """
+
     dev: int
     ino: int
     uid: int
@@ -265,8 +323,8 @@ class _Identity:
     ctime_ns: int
 
 
-def _identity(info: os.stat_result) -> _Identity:
-    return _Identity(
+def _identity(info: os.stat_result) -> DescriptorRequestIdentity:
+    return DescriptorRequestIdentity(
         info.st_dev,
         info.st_ino,
         info.st_uid,
@@ -276,6 +334,11 @@ def _identity(info: os.stat_result) -> _Identity:
         info.st_mtime_ns,
         info.st_ctime_ns,
     )
+
+
+# Kept private for backwards-compatible internal annotations while exposing
+# the descriptor contract to the broker journal without leaking path helpers.
+_Identity = DescriptorRequestIdentity
 
 
 def _validate_binding(run_id: str, round: int, stage: str) -> BundleBinding:
@@ -470,19 +533,18 @@ def authorize_mediation_result(
     curated_checks: tuple[CuratedCheck, ...],
     token_ledger_reservation_id: str,
     provider_usage_evidence_sha256: str,
-    fixture: bool = False,
-) -> MediationAuthorization:
+    fixture_capability: FixtureVMBundleCapability,
+) -> _FixtureMediationAuthorization:
     """Issue the only authorization shape accepted by a strict-VM LFRQ build.
 
     A raw action document is never an authorization.  The controller must
     supply a re-validated mediator result, its exact policy and a curated
-    check-to-argv registry.  Production issuer identity/signing remains a
-    separate release gate; this helper accepts fixture authority only when the
-    caller says so explicitly.
+    check-to-argv registry. Production issuer identity/signing remains a
+    separate release gate; only the module-confined fixture capability reaches
+    this helper.
     """
 
-    if not fixture:
-        raise BundleError("broker attestation verification is not implemented")
+    _require_fixture_capability(fixture_capability)
     raw_action = validate_mediation_result(result, request)
     if not isinstance(policy, Mapping):
         raise BundleError("controller policy must be a mapping")
@@ -508,14 +570,14 @@ def authorize_mediation_result(
         or _SHA256.fullmatch(provider_usage_evidence_sha256) is None
     ):
         raise BundleError("provider usage evidence identity must be a SHA-256 digest")
-    if fixture and provider_usage_evidence_sha256 != FIXTURE_USAGE_EVIDENCE_SHA256:
+    if provider_usage_evidence_sha256 != FIXTURE_USAGE_EVIDENCE_SHA256:
         raise BundleError("fixture authorization must use deterministic usage evidence")
-    if result.receipt.usage_source != ("fixture" if fixture else "provider"):
+    if result.receipt.usage_source != "fixture":
         raise BundleError("mediation receipt source does not match authorization authority")
     receipt = result.receipt.to_dict()
     receipt.update(
         {
-            "authority": "fixture" if fixture else "broker",
+            "authority": "fixture",
             "policy_sha256": hashlib.sha256(
                 _canonical_json(canonical_policy, REQUEST_JSON_CAPS["policy"])
             ).hexdigest(),
@@ -528,13 +590,13 @@ def authorize_mediation_result(
     )
     canonical_receipt = json.loads(_canonical_json(receipt, REQUEST_JSON_CAPS["mediation"]))
     action_batch = json.loads(raw_action)
-    return MediationAuthorization(
+    return _FixtureMediationAuthorization(
+        identity=_FIXTURE_VM_BUNDLE_CAPABILITY_IDENTITY,
         policy=canonical_policy,
         check_registry=registry,
         action_batch=action_batch,
         proposed_patch=result.patch,
         receipt=canonical_receipt,
-        fixture=fixture,
     )
 
 
@@ -543,7 +605,8 @@ def _validate_mediation_receipt(
     sections: Mapping[str, Any],
     raw_sections: Mapping[str, SectionReference],
     *,
-    fixture_authorization: bool,
+    fixture_capability: FixtureVMBundleCapability | None,
+    permit_unattested_broker_shape: bool = False,
 ) -> None:
     """Verify the sealed receipt, policy, registry, patch, and action batch agree."""
 
@@ -596,10 +659,18 @@ def _validate_mediation_receipt(
     if set(receipt) != expected or receipt.get("schema_version") != 1:
         raise BundleError("mediation receipt must have the exact controller-issued shape")
     if receipt["authority"] == "fixture":
-        if not fixture_authorization or receipt.get("usage_source") != "fixture":
+        if fixture_capability is None:
+            raise BundleError("fixture mediation is never production broker authority")
+        if receipt.get("usage_source") != "fixture":
             raise BundleError("fixture mediation authorization is not enabled for this build")
+        _require_fixture_capability(fixture_capability)
     elif receipt["authority"] == "broker" and receipt.get("usage_source") == "provider":
-        raise BundleError("broker attestation verification is not implemented")
+        # This parser may check a complete broker-shaped record structurally so
+        # the source-disabled broker can bind every field before it reports its
+        # missing OS-backed attestation.  It is deliberately not an authority
+        # check: no caller can turn this flag into a VM launch authorization.
+        if not permit_unattested_broker_shape:
+            raise BundleError("broker attestation verification is not implemented")
     else:
         raise BundleError("mediation receipt authority is not accepted")
     identity = {
@@ -644,6 +715,65 @@ def _validate_mediation_receipt(
         or _SHA256.fullmatch(receipt["patch_sha256"]) is None
     ):
         raise BundleError("mediation receipt patch digest is invalid")
+    _validate_mediation_receipt_scalars(receipt)
+
+
+def _validate_mediation_receipt_scalars(receipt: Mapping[str, Any]) -> None:
+    """Reapply untrusted wire-receipt invariants without trusting dataclasses.
+
+    ``MediationReceipt`` normally receives these checks in ``model_mediator``.
+    LFRQ parsing receives canonical JSON instead, so it must repeat the
+    provider usage, resource-cap, and timestamp invariants before a complete
+    sealed request is accepted.
+    """
+
+    try:
+        limits = MediationLimits(
+            max_response_bytes=receipt["max_response_bytes"],
+            max_patch_bytes=receipt["max_patch_bytes"],
+            max_actions=receipt["max_actions"],
+            input_token_cap=receipt["input_token_cap"],
+            output_token_cap=receipt["output_token_cap"],
+            total_token_cap=receipt["total_token_cap"],
+            call_index=receipt["call_index"],
+            call_cap=receipt["call_cap"],
+        )
+        expected_source = "fixture" if receipt["authority"] == "fixture" else "provider"
+        validate_reported_token_counts(
+            ReportedTokenCounts(
+                input_tokens=receipt["input_tokens"],
+                output_tokens=receipt["output_tokens"],
+                cached_input_tokens=receipt["cached_input_tokens"],
+                reasoning_tokens=receipt["reasoning_tokens"],
+                total_tokens=receipt["total_tokens"],
+                source=receipt["usage_source"],
+                exact=receipt["exact_usage"],
+            ),
+            limits,
+            fixture=expected_source == "fixture",
+        )
+    except (KeyError, MediatorValidationError, TypeError, ValueError) as exc:
+        raise BundleError("mediation receipt usage or limits are invalid") from exc
+    started = _parse_canonical_receipt_timestamp(receipt["started_at"], "started_at")
+    finished = _parse_canonical_receipt_timestamp(receipt["finished_at"], "finished_at")
+    deadline = _parse_canonical_receipt_timestamp(receipt["deadline_at"], "deadline_at")
+    if finished < started or finished >= deadline:
+        raise BundleError("mediation receipt timestamps are reversed or exceed the deadline")
+
+
+def _parse_canonical_receipt_timestamp(value: Any, label: str) -> datetime:
+    if type(value) is not str or not value.endswith("Z"):
+        raise BundleError(f"mediation receipt {label} is not canonical UTC")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise BundleError(f"mediation receipt {label} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise BundleError(f"mediation receipt {label} is not UTC")
+    canonical = parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if value != canonical:
+        raise BundleError(f"mediation receipt {label} is not canonical UTC")
+    return parsed.astimezone(UTC)
 
 
 def build_authorized_request_bundle(
@@ -655,9 +785,10 @@ def build_authorized_request_bundle(
     manifest: Mapping[str, Any],
     source_capsule: Path,
     task: Mapping[str, Any],
-    authorization: MediationAuthorization | BrokerSealedAuthorization,
+    authorization: _FixtureMediationAuthorization | BrokerSealedAuthorization,
     cumulative_patch: bytes | str | Path | None = None,
     prior_observations: Mapping[str, Any] | None = None,
+    fixture_capability: FixtureVMBundleCapability,
 ) -> ParsedBundle:
     """Build an LFRQ only from a controller-issued mediation authorization.
 
@@ -667,10 +798,14 @@ def build_authorized_request_bundle(
     tests, but it rejects missing receipt authority by default.
     """
 
+    _require_fixture_capability(fixture_capability)
     if type(authorization) is BrokerSealedAuthorization:
         raise BundleError("broker attestation verification is not implemented")
-    if type(authorization) is not MediationAuthorization or not authorization.fixture:
-        raise BundleError("strict VM request requires explicit fixture authorization")
+    if (
+        type(authorization) is not _FixtureMediationAuthorization
+        or authorization.identity is not _FIXTURE_VM_BUNDLE_CAPABILITY_IDENTITY
+    ):
+        raise BundleError("strict VM request requires module-issued fixture authorization")
     sections: dict[str, Any] = {
         "manifest": dict(manifest),
         "source_capsule": Path(source_capsule),
@@ -692,7 +827,7 @@ def build_authorized_request_bundle(
         round=round,
         stage=stage,
         sections=sections,
-        fixture_authorization=authorization.fixture,
+        fixture_capability=fixture_capability,
     )
 
 
@@ -745,7 +880,8 @@ def _validate_request_stage_sections(
     sections: Mapping[str, Any],
     raw_sections: Mapping[str, SectionReference],
     *,
-    fixture_authorization: bool,
+    fixture_capability: FixtureVMBundleCapability | None,
+    permit_unattested_broker_shape: bool = False,
 ) -> None:
     if binding.stage == "final_verify" and "cumulative_patch" not in raw_sections:
         raise BundleError("final_verify requires the frozen cumulative_patch")
@@ -753,7 +889,8 @@ def _validate_request_stage_sections(
         binding,
         sections,
         raw_sections,
-        fixture_authorization=fixture_authorization,
+        fixture_capability=fixture_capability,
+        permit_unattested_broker_shape=permit_unattested_broker_shape,
     )
     _validate_action_document(binding, sections, raw_sections)
 
@@ -1195,7 +1332,7 @@ def build_request_bundle(
     round: int,
     stage: str,
     sections: Mapping[str, Any],
-    fixture_authorization: bool = False,
+    fixture_capability: FixtureVMBundleCapability,
 ) -> ParsedBundle:
     """Build a sealed 0400 LFRQ request without loading an opaque capsule into RAM.
 
@@ -1203,6 +1340,7 @@ def build_request_bundle(
     a bounded buffer.  ``cumulative_patch`` may also be a Path for streaming.
     """
 
+    _require_fixture_capability(fixture_capability)
     binding = _validate_binding(run_id, round, stage)
     if not isinstance(sections, Mapping) or not REQUIRED_REQUEST_SECTION_TYPES.issubset(sections):
         raise BundleError("request omits a required section type")
@@ -1254,7 +1392,7 @@ def build_request_bundle(
         binding,
         sections,
         provisional_raw_sections,
-        fixture_authorization=fixture_authorization,
+        fixture_capability=fixture_capability,
     )
     cursor = HEADER_BYTES
     layout: list[tuple[str, int, int, bytes | Path, bytes | None, bool]] = []
@@ -1312,7 +1450,7 @@ def build_request_bundle(
         run_id=run_id,
         round=round,
         stage=stage,
-        fixture_authorization=fixture_authorization,
+        fixture_capability=fixture_capability,
     )
 
 
@@ -1322,10 +1460,11 @@ def parse_request_bundle(
     run_id: str,
     round: int,
     stage: str,
-    fixture_authorization: bool = False,
+    fixture_capability: FixtureVMBundleCapability,
 ) -> ParsedBundle:
     """Validate a sealed variable-size LFRQ request with streaming raw checks."""
 
+    _require_fixture_capability(fixture_capability)
     binding = _validate_binding(run_id, round, stage)
     try:
         requested_size = path.lstat().st_size
@@ -1335,61 +1474,163 @@ def parse_request_bundle(
         raise BundleError("request exact size is outside aligned bounds")
     descriptor, identity = _open_exact(path, size=requested_size, mode=0o400)
     try:
-        header = _pread_exact(descriptor, HEADER_BYTES, 0)
-        records, payload_digest, _ = _parse_header(
-            header,
-            magic=REQUEST_MAGIC,
-            total_size=requested_size,
-            expected=binding,
-            allowed_types=REQUEST_SECTION_TYPES,
-            required_types=REQUIRED_REQUEST_SECTION_TYPES,
-            caps={**REQUEST_JSON_CAPS, **REQUEST_RAW_CAPS},
-            payload_start=HEADER_BYTES,
-            payload_end=requested_size,
-            require_marker=False,
+        return _parse_request_descriptor(
+            descriptor,
+            identity=identity,
+            binding=binding,
+            fixture_capability=fixture_capability,
         )
-        if (
-            _hash_range(
-                descriptor,
-                HEADER_BYTES,
-                requested_size,
-                require_zero_gaps=_gaps(HEADER_BYTES, requested_size, records),
-            )
-            != payload_digest
-        ):
-            raise BundleError("request whole-payload SHA-256 does not match")
-        sections: dict[str, Any] = {}
-        raw_sections: dict[str, SectionReference] = {}
-        for section_type, offset, length, digest in records:
-            if _stream_section_hash(descriptor, offset, length) != digest:
-                raise BundleError("request section hash does not match")
-            if section_type in REQUEST_JSON_CAPS:
-                sections[section_type] = _read_json_section(
-                    descriptor, offset, length, REQUEST_JSON_CAPS[section_type]
-                )
-            else:
-                if section_type in {"cumulative_patch", "proposed_patch"}:
-                    _validate_utf8_section(descriptor, offset, length)
-                raw_sections[section_type] = SectionReference(
-                    section_type, offset, length, digest.hex()
-                )
-        _validate_request_stage_sections(
-            binding,
-            sections,
-            raw_sections,
-            fixture_authorization=fixture_authorization,
-        )
-        whole_request_sha256 = _hash_plain_range(descriptor, 0, requested_size).hex()
-        _verify_identity(descriptor, identity)
     finally:
         os.close(descriptor)
-    return ParsedBundle(
+
+
+def capture_request_descriptor_identity(
+    descriptor: int, *, expected_uid: int
+) -> DescriptorRequestIdentity:
+    """Capture the exact identity of an already-open broker-owned LFRQ FD.
+
+    This helper neither opens a path nor follows one.  Its caller is
+    responsible for obtaining ``descriptor`` using a broker-owned directory
+    FD with ``O_NOFOLLOW``; the returned identity is subsequently required by
+    :func:`parse_request_bundle_descriptor`.
+    """
+
+    if (
+        type(descriptor) is not int
+        or descriptor < 0
+        or type(expected_uid) is not int
+        or expected_uid < 0
+    ):
+        raise BundleError("request descriptor contract is malformed")
+    try:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        observed = _identity(os.fstat(descriptor))
+    except OSError as exc:
+        raise BundleError("request descriptor is unavailable") from exc
+    if (
+        not flags & fcntl.FD_CLOEXEC
+        or not stat.S_ISREG(os.fstat(descriptor).st_mode)
+        or observed.uid != expected_uid
+        or observed.mode != 0o400
+        or observed.nlink != 1
+        or not HEADER_BYTES <= observed.size <= MAX_REQUEST_BYTES
+        or observed.size % ALIGNMENT
+    ):
+        raise BundleError("request descriptor identity, mode, or size is unsafe")
+    return observed
+
+
+def _parse_request_descriptor(
+    descriptor: int,
+    *,
+    identity: DescriptorRequestIdentity,
+    binding: BundleBinding,
+    fixture_capability: FixtureVMBundleCapability | None,
+    permit_unattested_broker_shape: bool = False,
+) -> ParsedBundle:
+    """Shared full LFRQ parser for path fixtures and descriptor-only admission."""
+
+    if not isinstance(identity, DescriptorRequestIdentity):
+        raise BundleError("request descriptor identity is malformed")
+    _verify_identity(descriptor, identity)
+    requested_size = identity.size
+    header = _pread_exact(descriptor, HEADER_BYTES, 0)
+    records, payload_digest, _ = _parse_header(
+        header,
+        magic=REQUEST_MAGIC,
+        total_size=requested_size,
+        expected=binding,
+        allowed_types=REQUEST_SECTION_TYPES,
+        required_types=REQUIRED_REQUEST_SECTION_TYPES,
+        caps={**REQUEST_JSON_CAPS, **REQUEST_RAW_CAPS},
+        payload_start=HEADER_BYTES,
+        payload_end=requested_size,
+        require_marker=False,
+    )
+    if (
+        _hash_range(
+            descriptor,
+            HEADER_BYTES,
+            requested_size,
+            require_zero_gaps=_gaps(HEADER_BYTES, requested_size, records),
+        )
+        != payload_digest
+    ):
+        raise BundleError("request whole-payload SHA-256 does not match")
+    sections: dict[str, Any] = {}
+    raw_sections: dict[str, SectionReference] = {}
+    for section_type, offset, length, digest in records:
+        if _stream_section_hash(descriptor, offset, length) != digest:
+            raise BundleError("request section hash does not match")
+        if section_type in REQUEST_JSON_CAPS:
+            sections[section_type] = _read_json_section(
+                descriptor, offset, length, REQUEST_JSON_CAPS[section_type]
+            )
+        else:
+            if section_type in {"cumulative_patch", "proposed_patch"}:
+                _validate_utf8_section(descriptor, offset, length)
+            raw_sections[section_type] = SectionReference(
+                section_type, offset, length, digest.hex()
+            )
+    _validate_request_stage_sections(
         binding,
         sections,
         raw_sections,
-        whole_request_sha256,
-        fixture_authorization=fixture_authorization,
+        fixture_capability=fixture_capability,
+        permit_unattested_broker_shape=permit_unattested_broker_shape,
     )
+    whole_request_sha256 = _hash_plain_range(descriptor, 0, requested_size).hex()
+    _verify_identity(descriptor, identity)
+    return ParsedBundle(binding, sections, raw_sections, whole_request_sha256)
+
+
+def parse_request_bundle_descriptor(
+    descriptor: int,
+    *,
+    identity: DescriptorRequestIdentity,
+    expected_uid: int,
+    run_id: str,
+    round: int,
+    stage: str,
+) -> ParsedBundle:
+    """Fully parse an already-open broker LFRQ without a pathname.
+
+    This is a *structural* parser for the source-disabled future broker.  It
+    accepts only a broker-shaped mediation receipt, rejects fixture authority,
+    and deliberately does not claim that the broker receipt is authenticated.
+    The caller must next verify the installed peer/code-signature attestation,
+    durable reservation, and controller-owned binding before any launcher plan
+    can exist.
+    """
+
+    binding = _validate_binding(run_id, round, stage)
+    if type(descriptor) is not int or descriptor < 0:
+        raise BundleError("request descriptor is invalid")
+    try:
+        original_flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        if not original_flags & fcntl.FD_CLOEXEC:
+            raise BundleError("original request descriptor is inheritable")
+        duplicated = os.dup(descriptor)
+    except OSError as exc:
+        raise BundleError("request descriptor cannot be retained") from exc
+    try:
+        flags = fcntl.fcntl(duplicated, fcntl.F_GETFD)
+        if not flags & fcntl.FD_CLOEXEC:
+            raise BundleError("request descriptor is inheritable")
+        # Do not trust a caller-constructed identity object: repeat the exact
+        # owner/mode/link/size contract on the retained descriptor before
+        # comparing all metadata around the streaming parse.
+        if capture_request_descriptor_identity(duplicated, expected_uid=expected_uid) != identity:
+            raise BundleError("request descriptor identity changed before parsing")
+        return _parse_request_descriptor(
+            duplicated,
+            identity=identity,
+            binding=binding,
+            fixture_capability=None,
+            permit_unattested_broker_shape=True,
+        )
+    finally:
+        os.close(duplicated)
 
 
 def _read_bounded_raw_section(descriptor: int, offset: int, length: int) -> bytes:
@@ -1827,6 +2068,7 @@ def validate_guest_result(
     *,
     guest_policy_sha256: str,
     max_observation_bytes: int,
+    fixture_capability: FixtureVMBundleCapability,
 ) -> VerifiedGuestResult:
     """Bind a stopped guest's LFRS record to its sealed mediated request.
 
@@ -1838,11 +2080,12 @@ def validate_guest_result(
 
     if not isinstance(result, TailResult) or not isinstance(request, ParsedBundle):
         raise BundleError("guest result validator requires parsed sealed records")
+    _require_fixture_capability(fixture_capability)
     _validate_request_stage_sections(
         request.binding,
         request.sections,
         request.raw_sections,
-        fixture_authorization=request.fixture_authorization,
+        fixture_capability=fixture_capability,
     )
     if result.binding != request.binding:
         raise BundleError("guest result and request bindings do not match")

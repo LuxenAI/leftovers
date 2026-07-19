@@ -30,11 +30,11 @@ from .config import StrictVMConfig
 from .strict_vm_lease import StrictVMRunLease, VMCleanupReceipt
 from .vm_bundle import (
     ALIGNMENT,
-    MediationAuthorization,
     TailResult,
     VerifiedGuestResult,
     build_authorized_request_bundle,
     extract_tail_result,
+    fixture_vm_bundle_capability,
     read_raw_section,
     validate_guest_result,
 )
@@ -637,6 +637,14 @@ def _stop_group(process: subprocess.Popen[bytes]) -> bool:
             os.killpg(process_group, signal_value)
         except ProcessLookupError:
             return True
+        except PermissionError as exc:
+            # Darwin may surface EPERM instead of ESRCH if the session leader
+            # exits between the liveness probe and this signal. Reap/check the
+            # immutable direct child before deciding whether this is failure;
+            # never retry a numeric PGID after that child is gone.
+            if process.poll() is not None:
+                return True
+            raise StrictVMLaunchError("launcher process group cannot be terminated") from exc
         except OSError as exc:
             raise StrictVMLaunchError("launcher process group cannot be terminated") from exc
         deadline = time.monotonic() + seconds
@@ -922,7 +930,7 @@ class StrictVMOneEpochController:
         stage: str,
         source_capsule: Path,
         task: Mapping[str, Any],
-        authorization: MediationAuthorization,
+        authorization: object,
         cumulative_patch: bytes | str | Path | None = None,
         prior_observations: Mapping[str, Any] | None = None,
     ) -> StrictVMEpochResult:
@@ -961,6 +969,7 @@ class StrictVMOneEpochController:
                 authorization=authorization,
                 cumulative_patch=cumulative_patch,
                 prior_observations=prior_observations,
+                fixture_capability=fixture_vm_bundle_capability(),
             )
             if request_path.stat().st_size > self.config.max_request_bytes:
                 raise StrictVMRunnerError("sealed request exceeds the configured strict VM cap")
@@ -1064,6 +1073,7 @@ class StrictVMOneEpochController:
                 parsed_request,
                 guest_policy_sha256=readiness.guest_policy_sha256,
                 max_observation_bytes=self.config.max_observation_bytes,
+                fixture_capability=fixture_vm_bundle_capability(),
             )
             patch = read_raw_section(
                 scratch_path,
