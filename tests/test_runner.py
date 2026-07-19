@@ -6,12 +6,14 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
+import leftovers.runner as runner
 from leftovers.config import AgentConfig, SandboxConfig
 from leftovers.models import CommandResult
 from leftovers.prompts import RenderedPrompt
 from leftovers.runner import (
     AgentOutputError,
     AgentRunner,
+    RunnerCleanupError,
     RunnerError,
     _AdapterTelemetryMonitor,
     _validate_agent_payload,
@@ -20,6 +22,67 @@ from leftovers.runner import (
 
 
 class RunnerTests(unittest.TestCase):
+    def test_ordinary_agent_runner_is_explicitly_rehearsal_only(self) -> None:
+        runner_instance = AgentRunner(
+            SandboxConfig(runtime="docker", image="image@sha256:abc"),
+            AgentConfig(command=("agent",)),
+        )
+        with self.assertRaisesRegex(RunnerError, "strict VM isolation.*rehearsal-only"):
+            runner_instance.assert_production_isolation()
+
+    def test_process_group_signal_failure_preserves_cleanup_identity(self) -> None:
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        with (
+            mock.patch.object(runner, "_process_group_is_alive", return_value=True),
+            mock.patch.object(runner.os, "killpg", side_effect=PermissionError("denied")),
+            self.assertRaises(RunnerCleanupError) as raised,
+        ):
+            runner._terminate_process_group(process)
+
+        self.assertEqual(raised.exception.process_group, 4242)
+        self.assertIn("cannot signal", str(raised.exception))
+
+    def test_cleanup_error_still_closes_all_child_pipes(self) -> None:
+        captured: list[object] = []
+        original_popen = runner.subprocess.Popen
+
+        def capture_process(*args: object, **kwargs: object) -> object:
+            process = original_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        cleanup_failure = RunnerCleanupError("owned process group remained live", 4242)
+        with (
+            mock.patch.object(runner.subprocess, "Popen", side_effect=capture_process),
+            mock.patch.object(
+                runner,
+                "_terminate_process_group",
+                side_effect=cleanup_failure,
+            ),
+            self.assertRaises(RunnerCleanupError) as raised,
+        ):
+            runner.execute(
+                [
+                    __import__("sys").executable,
+                    "-c",
+                    "import sys; sys.stdin.buffer.read()",
+                ],
+                cwd=None,
+                env={},
+                stdin="fixture",
+                timeout=5,
+                max_output_bytes=1_024,
+            )
+
+        self.assertIs(raised.exception, cleanup_failure)
+        self.assertEqual(len(captured), 1)
+        process = captured[0]
+        for stream in (process.stdin, process.stdout, process.stderr):
+            self.assertIsNotNone(stream)
+            self.assertTrue(stream.closed)
+
     def test_host_agent_git_config_mutation_is_rejected_before_controller_git(self) -> None:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(root))
@@ -331,6 +394,22 @@ class RunnerTests(unittest.TestCase):
                 timeout=1,
             )
         cleanup.assert_called_once_with("run-123", "planning")
+
+    def test_container_cleanup_failure_does_not_mask_owned_process_group_failure(self) -> None:
+        runner = AgentRunner(
+            SandboxConfig(runtime="docker", image="image@sha256:abc"),
+            AgentConfig(command=("agent",)),
+        )
+        failure = RunnerCleanupError("owned process group remained live", 4242)
+        with (
+            mock.patch("leftovers.runner.execute", side_effect=failure),
+            mock.patch.object(runner, "_remove_container", return_value=False),
+            self.assertRaises(RunnerCleanupError) as raised,
+        ):
+            runner._execute_container(
+                ["docker", "run"], run_id="run-123", stage="planning", stdin=None, timeout=1
+            )
+        self.assertEqual(raised.exception.process_group, 4242)
 
     def test_cleanup_refuses_container_without_exact_ownership_labels(self) -> None:
         runner = AgentRunner(

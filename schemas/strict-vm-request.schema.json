@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.invalid/schemas/strict-vm-request.schema.json",
+  "title": "Leftovers LFRQ request section envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "round", "stage", "sections"],
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "round": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "stage": {"enum": ["planning", "implementation", "review", "final_verify"]},
+    "sections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest",
+        "source_capsule",
+        "task",
+        "policy",
+        "check_registry",
+        "mediation",
+        "action_batch"
+      ],
+      "properties": {
+        "manifest": {},
+        "source_capsule": {"description": "Opaque, required byte section in the LFRQ record."},
+        "task": {},
+        "policy": {"$ref": "#/$defs/actionPolicy"},
+        "check_registry": {"$ref": "#/$defs/checkRegistry"},
+        "mediation": {"$ref": "#/$defs/mediationReceipt"},
+        "cumulative_patch": {"type": "string"},
+        "proposed_patch": {
+          "description": "Bounded UTF-8 patch byte section whose SHA-256 must match apply_patch."
+        },
+        "action_batch": {"$ref": "strict-vm-action-batch.schema.json"},
+        "prior_observations": {}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"stage": {"const": "final_verify"}}},
+      "then": {
+        "properties": {
+          "sections": {
+            "required": ["cumulative_patch"]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "boundIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "actionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "provider",
+        "model",
+        "reasoning_effort",
+        "allowed_check_ids",
+        "max_actions"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "provider": {"$ref": "#/$defs/boundIdentifier"},
+        "model": {"$ref": "#/$defs/boundIdentifier"},
+        "reasoning_effort": {"enum": ["low", "medium", "high"]},
+        "allowed_check_ids": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}
+        },
+        "max_actions": {"type": "integer", "minimum": 1, "maximum": 32}
+      }
+    },
+    "checkRegistry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "checks"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "checks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["check_id", "argv"],
+            "properties": {
+              "check_id": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"},
+              "argv": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+              }
+            }
+          }
+        }
+      }
+    },
+    "mediationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "run_id", "round", "stage", "provider", "model",
+        "reasoning_effort", "input_sha256", "action_batch_sha256", "patch_sha256",
+        "output_sha256", "input_tokens", "output_tokens", "cached_input_tokens",
+        "reasoning_tokens", "total_tokens", "usage_source", "exact_usage",
+        "max_response_bytes", "max_patch_bytes", "max_actions", "input_token_cap",
+        "output_token_cap", "total_token_cap", "call_index", "call_cap", "deadline_at",
+        "started_at", "finished_at", "authority", "policy_sha256", "check_registry_sha256",
+        "token_ledger_reservation_id", "provider_usage_evidence_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "round": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "stage": {"enum": ["planning", "implementation", "review", "final_verify"]},
+        "provider": {"$ref": "#/$defs/boundIdentifier"},
+        "model": {"$ref": "#/$defs/boundIdentifier"},
+        "reasoning_effort": {"enum": ["low", "medium", "high"]},
+        "input_sha256": {"$ref": "#/$defs/digest"},
+        "action_batch_sha256": {"$ref": "#/$defs/digest"},
+        "patch_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "output_sha256": {"$ref": "#/$defs/digest"},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "cached_input_tokens": {"type": "integer", "minimum": 0},
+        "reasoning_tokens": {"type": "integer", "minimum": 0},
+        "total_tokens": {"type": "integer", "minimum": 0},
+        "usage_source": {"enum": ["fixture", "provider"]},
+        "exact_usage": {"const": true},
+        "max_response_bytes": {"type": "integer", "minimum": 1},
+        "max_patch_bytes": {"type": "integer", "minimum": 1},
+        "max_actions": {"type": "integer", "minimum": 1, "maximum": 32},
+        "input_token_cap": {"type": "integer", "minimum": 1},
+        "output_token_cap": {"type": "integer", "minimum": 1},
+        "total_token_cap": {"type": "integer", "minimum": 1},
+        "call_index": {"type": "integer", "minimum": 1},
+        "call_cap": {"type": "integer", "minimum": 1},
+        "deadline_at": {"type": "string"},
+        "started_at": {"type": "string"},
+        "finished_at": {"type": "string"},
+        "authority": {"enum": ["fixture", "broker"]},
+        "policy_sha256": {"$ref": "#/$defs/digest"},
+        "check_registry_sha256": {"$ref": "#/$defs/digest"},
+        "token_ledger_reservation_id": {"$ref": "#/$defs/digest"},
+        "provider_usage_evidence_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

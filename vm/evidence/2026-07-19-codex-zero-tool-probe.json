@@ -1,0 +1,99 @@
+{
+  "evidence_version": 1,
+  "observed_at": "2026-07-19T01:23:00Z",
+  "purpose": "Non-production synthetic probe of the pinned Codex CLI JSONL lifecycle with every known model tool feature explicitly disabled.",
+  "cli_identity": {
+    "path": "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "sha256": "a2bc3f63b0d7ce5c065ae070e16d964fa71192bf6ceb8da82d2315227d55a6bf",
+    "version": "0.145.0-alpha.18"
+  },
+  "model_identity": {
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "high"
+  },
+  "invocation_controls": {
+    "approval_policy": "never",
+    "cwd_was_empty_private_directory": true,
+    "ephemeral": true,
+    "ignored_rules": true,
+    "ignored_user_config": true,
+    "inherited_shell_environment": "none",
+    "sandbox": "read-only",
+    "strict_config": true
+  },
+  "disabled_features": [
+    "apps",
+    "artifact",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "chronicle",
+    "code_mode",
+    "code_mode_host",
+    "computer_use",
+    "default_mode_request_user_input",
+    "enable_mcp_apps",
+    "goals",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "network_proxy",
+    "plugins",
+    "remote_plugin",
+    "request_permissions_tool",
+    "shell_snapshot",
+    "shell_tool",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "standalone_web_search",
+    "tool_call_mcp_elicitation",
+    "tool_suggest",
+    "unified_exec",
+    "workspace_dependencies"
+  ],
+  "synthetic_prompt": "Reply with exactly PROBE_OK. Do not call any tool.",
+  "events": [
+    {
+      "thread_id": "019f77f7-a2a0-7522-be34-74e241dd3917",
+      "type": "thread.started"
+    },
+    {
+      "type": "turn.started"
+    },
+    {
+      "item": {
+        "id": "item_0",
+        "text": "PROBE_OK",
+        "type": "agent_message"
+      },
+      "type": "item.completed"
+    },
+    {
+      "type": "turn.completed",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 11787,
+        "output_tokens": 7,
+        "reasoning_output_tokens": 0
+      }
+    }
+  ],
+  "result": "PROBE_OK",
+  "observations": {
+    "model_tool_items_observed": 0,
+    "process_exit_success": true,
+    "result_file_bytes": 8,
+    "result_parent_mode": "0700"
+  },
+  "limitations": [
+    "The CLI used saved ChatGPT subscription authentication through CODEX_HOME; this probe does not implement a credential-isolating broker.",
+    "No repository, Git checkout, host share, publisher, GitHub credential, or VM guest was present.",
+    "Absence of tool events in one synthetic invocation does not prove that the CLI has no hidden, future, or unreported tool surface.",
+    "Production Codex mediation, broker attestation, strict VM execution, and whole-cycle orchestration remain source-disabled."
+  ]
+}

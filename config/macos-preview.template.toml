@@ -1,0 +1,135 @@
+# Rendered by scripts/install_macos.py. This profile is deliberately scout/rehearsal-only: host
+# Codex execution and ordinary OCI execution are denied by the production isolation gate.
+version = 1
+state_dir = "__STATE_DIR__"
+temp_root = "__TEMP_ROOT__"
+
+[github]
+api_url = "https://api.github.com"
+token_env = "LEFTOVERS_GITHUB_READ_TOKEN"
+api_version = "2026-03-10"
+request_timeout_seconds = 10
+max_read_requests_per_run = 150
+
+[budget]
+# Consumer Codex subscriptions expose no supported remaining-token API. This is a conservative
+# admission envelope, not a claim about the account's actual quota and not a provider-side cap.
+source = "fixed"
+fixed_remaining_tokens = 65000
+maximum_tokens = 65000
+reserve_tokens = 10000
+minimum_spendable_tokens = 40000
+safety_multiplier = 1.10
+window = "daily"
+timezone = "America/Phoenix"
+reset_hour = 0
+reset_weekday = 0
+max_run_seconds = 2700
+reset_safety_seconds = 600
+
+[discovery]
+query = 'is:issue is:open no:assignee -linked:pr label:"help wanted"'
+per_repo_limit = 8
+max_candidates = 24
+
+[scoring]
+minimum_score = 60
+repository_impact_weight = 0.28
+urgency_weight = 0.22
+user_demand_weight = 0.15
+maintainer_signal_weight = 0.15
+tractability_weight = 0.12
+neglect_weight = 0.08
+technical_risk_penalty = 0.20
+collision_risk_penalty = 0.12
+scope_uncertainty_penalty = 0.08
+
+[policy]
+require_unassigned = true
+require_no_open_linked_pr = true
+require_license = true
+max_changed_files = 5
+max_changed_lines = 300
+max_patch_bytes = 250000
+ai_policy_max_age_days = 30
+deny_labels = [
+  "security",
+  "vulnerability",
+  "credentials",
+  "authentication",
+  "authorization",
+  "cryptography",
+  "infrastructure",
+  "dependencies",
+  "release",
+  "legal",
+  "needs-design",
+  "breaking-change",
+  "wontfix",
+]
+forbid_paths = [
+  ".github/workflows/**",
+  "SECURITY.md",
+  "CODEOWNERS",
+  ".gitmodules",
+  ".gitattributes",
+  "**/*.pem",
+  "**/*.key",
+]
+forbid_dependency_changes = true
+
+[sandbox]
+runtime = "__RUNTIME__"
+image = "leftovers-sandbox:local-preview"
+network = "none"
+memory = "4g"
+cpus = 2.0
+pids_limit = 256
+timeout_seconds = 480
+tmpfs_size = "512m"
+
+[agent]
+backend = "host"
+command = ["__PYTHON__", "__ADAPTER__"]
+provider = "openai-codex-cli"
+model = "gpt-5.6-terra"
+checkin_required = true
+usage_reporting_required = true
+checkin_timeout_seconds = 20
+heartbeat_timeout_seconds = 60
+timeout_seconds = 1200
+max_output_bytes = 65536
+estimated_tokens_p50 = 40000
+estimated_tokens_p95 = 50000
+max_repair_cycles = 0
+pass_environment = []
+
+[publication]
+mode = "dry-run"
+external_writes_acknowledged = false
+require_cli_flag = true
+draft = true
+fork = true
+branch_prefix = "leftovers"
+disclose_ai_assistance = true
+max_prs_per_window = 1
+max_open_prs_per_repository = 1
+repository_cooldown_days = 14
+
+# Placeholder authority record. It intentionally fails AI-policy and verification admission. Replace
+# it only after reviewing a candidate from repository-candidates.json against docs/REPOSITORY_CURATION.md.
+[[repositories]]
+slug = "leftovers/curate-before-use"
+enabled = true
+importance = 0.0
+allowed_licenses = []
+allow_labels = ["help wanted", "good first issue"]
+deny_labels = []
+setup_commands = []
+test_commands = []
+forbid_paths = []
+max_changed_files = 5
+max_changed_lines = 300
+network = "none"
+require_human_approval = true
+ai_contributions_allowed = false

@@ -10,7 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from leftovers.cli import main
+from leftovers.cli import _doctor, main
+from leftovers.runner import RunnerCleanupError
 
 
 class _FakeRehearsalReport:
@@ -26,6 +27,48 @@ class _FakeRehearsalReport:
 
 
 class CliTests(unittest.TestCase):
+    def test_doctor_never_treats_oci_rehearsal_as_strict_vm_readiness(self) -> None:
+        config = SimpleNamespace(
+            agent=SimpleNamespace(backend="container"),
+            github=SimpleNamespace(token_env="LEFTOVERS_GITHUB_READ_TOKEN"),
+            publication=SimpleNamespace(mode="dry-run"),
+            sandbox=SimpleNamespace(
+                runtime="docker",
+                image="fixture@sha256:" + "a" * 64,
+            ),
+        )
+        with (
+            patch("leftovers.cli.shutil.which", return_value="/usr/bin/fixture"),
+            patch("leftovers.cli.os.geteuid", return_value=501),
+        ):
+            ok, checks = _doctor(config)
+
+        strict = next(check for check in checks if check["name"] == "strict_vm_execution")
+        self.assertFalse(ok)
+        self.assertFalse(strict["ok"])
+        self.assertEqual(strict["severity"], "error")
+
+    def test_cleanup_failure_has_machine_readable_nested_process_group(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch(
+                "leftovers.cli.load_config",
+                side_effect=RunnerCleanupError("could not prove cleanup", 4242),
+            ),
+            redirect_stderr(stderr),
+        ):
+            status = main(["--config", "unused.toml", "validate"])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(
+            json.loads(stderr.getvalue()),
+            {
+                "error": "RunnerCleanupError",
+                "message": "could not prove cleanup",
+                "process_group": 4242,
+            },
+        )
+
     def test_cleanup_protects_container_and_reserved_controller_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -229,6 +272,19 @@ class CliTests(unittest.TestCase):
                 ) as wrapper,
                 patch("leftovers.cli.subprocess.run", return_value=child) as execute,
                 patch("leftovers.cli.run_rehearsal") as run,
+                patch.dict(
+                    "os.environ",
+                    {
+                        "PATH": "/usr/bin:/bin",
+                        "CODEX_HOME": "/Users/example/.codex",
+                        "LEFTOVERS_CODEX_BIN": "/Applications/Codex.app/codex",
+                        "GITHUB_TOKEN": "github-secret",
+                        "OPENAI_API_KEY": "provider-secret",
+                        "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+                        "SSH_AUTH_SOCK": "/private/tmp/agent.sock",
+                    },
+                    clear=True,
+                ),
                 redirect_stdout(stdout),
             ):
                 status = main(
@@ -256,6 +312,17 @@ class CliTests(unittest.TestCase):
                 execute.call_args.kwargs["env"]["LEFTOVERS_REHEARSAL_SEATBELT_CHILD"],
                 "1",
             )
+            child_environment = execute.call_args.kwargs["env"]
+            self.assertEqual(child_environment["HOME"], child_environment["TMPDIR"])
+            for name in (
+                "CODEX_HOME",
+                "LEFTOVERS_CODEX_BIN",
+                "GITHUB_TOKEN",
+                "OPENAI_API_KEY",
+                "AWS_SECRET_ACCESS_KEY",
+                "SSH_AUTH_SOCK",
+            ):
+                self.assertNotIn(name, child_environment)
 
     def test_internal_root_is_not_a_public_escape_hatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

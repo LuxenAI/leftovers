@@ -13,8 +13,11 @@ and partial publication or cleanup failures.
 - No submodule recursion, LFS smudge, interactive credentials, external Git protocol, or hooks during
   shallow clone.
 - Worker configuration rejects GitHub credential environment variables.
-- Runtime flags drop capabilities and network, use a read-only root, no-new-privileges, CPU/RAM/PID/
-  file/tmpfs limits, and a read-only `.git` overlay.
+- Unattended production admission runs before budget, discovery, clone, or model work. It rejects
+  host agents, every non-empty environment pass-through, bridge networking (including repository
+  overrides), and the stock Docker/Podman runner.
+- OCI rehearsal flags drop capabilities and network, use a read-only root, no-new-privileges,
+  validated CPU/RAM/PID/file/tmpfs limits, and a read-only `.git` overlay.
 - Planning/review workspaces are read-only.
 - All configured commands are argv arrays and use `shell=False`.
 - Hard issue gates block security/legal/credential/design/collision work.
@@ -43,24 +46,66 @@ and partial publication or cleanup failures.
   clients and literal loopback binds, rejects mutation methods and unexpected Host/Origin values,
   bounds concurrency/requests/responses, and sends a restrictive CSP and related security headers.
 - The deterministic training fixture has no Git remote or publisher path. Its OCI mode uses the real
-  hardened runner and must prove label-scoped container and marker-scoped workspace cleanup.
+  hardened runner and must prove label-scoped container and marker-scoped workspace cleanup. Generic
+  callers cannot label a run as training to bypass production admission: training rejects publication
+  before consulting a publisher and admits only attested fixture runner/source/lease classes with the
+  fixed synthetic identity, no network (including repository overrides), and no environment forwarding.
+- `repo-scout` and the portable macOS job perform GitHub reads only. A nomination is emitted with
+  `execution_authorized: false`; it cannot mutate configuration, enable a repository, invoke the
+  publisher, or send GitHub credentials to the worker.
+- The portable macOS bundle rejects symlinked or out-of-repository roots and uses an owner-private
+  manifest, a one-shot low-priority launchd job, private reports/logs, and a kernel lock. Its
+  template hard-disables external writes. The host Codex adapter never invokes `--publish` and
+  configuration validation rejects it for draft PRs. Its guarded uninstaller validates the
+  manifest and job lock before removing only that exact root. Termination propagates from the
+  launchd wrapper through controller cleanup to the adapter-owned Codex process group. Before OCI
+  execution, a durable owner-private cleanup lease is created and can be cleared only by a matching
+  hash-chained receipt proving container and workspace removal; unresolved evidence blocks later
+  jobs, reinstall, and uninstall even after the process lock is released.
+- Worker results, telemetry, Codex JSONL/diagnostics, job captures, generated configuration,
+  manifests, and cleanup journals are lstat-checked and read through no-follow descriptors with
+  total-file and per-line limits. Final post-exit checks cover workers that write oversized files
+  between monitor ticks. Cleanup continues closing descriptors, removing temporary files, and
+  restoring handlers even when process termination proof fails.
+- The macOS launchd job has a compile-time execution deny gate, receives neither `CODEX_HOME` nor a
+  Codex binary path, and truncates its private one-shot logs before each launch.
+- `vm/strict_vm_launcher.swift` is a fail-closed boundary proof: its exact manifest cannot supply a
+  command, environment, network, mount, or device. Manifest v2 requires immutable boot artifacts
+  owned outside the non-root launcher account, sealed manifest/request inputs in a private per-run
+  directory, one fresh preallocated scratch disk, and zero NIC/socket/share or interactive devices;
+  receipt v2 binds the exact manifest SHA-256 and exhaustive device graph. The strict controller
+  derives (rather than accepts from TOML) the digest of an immutable canonical `guest-policy.json`;
+  that rejection-only policy must name the exact pinned kernel, initrd, and root-disk digests.
 
 ## Known assurance gaps
 
 Do not describe these as solved:
 
-- A local Docker/Podman container shares the host kernel. Intentionally hostile native code requires
-  a disposable VM/microVM backend, which v0.1 does not provision. Runtime rootlessness is
-  operator-provided and reported as unverified rather than portably proven by the controller.
-- The current checkout is a host-visible bind-mounted tree. A high-assurance backend should acquire
-  into an isolated volume, inspect file types/path collisions without trusting worker Git state, and
-  produce a canonical tree bundle from pristine baseline and worker volumes.
-- The local runner does not enforce a portable disk quota or custom seccomp/AppArmor profile.
-- Setup networking is coarse (`none` or `bridge`), not domain-allowlisted. Keep it `none` unless a
-  human accepts the supply-chain/exfiltration risk.
+- A local Docker/Podman container shares the host kernel, so it is rehearsal-only. The strict VM
+  launcher, one-epoch controller, typed request/result parser, cleanup lease, and guest source
+  scaffold exist, but every execution/mediator/broker/orchestrator gate remains source-disabled.
+  The guest is rejection-only, unbuilt, and unbooted; no production issue execution is authorized.
+- The current orchestrator still clones and inspects a host-visible checkout. A complete strict
+  runner must move acquisition, Git parsing, model/tool execution, verification, and diff creation
+  into guest-owned disks and return only a bounded canonical bundle after shutdown.
+- The strict launcher bounds VM memory/CPU/time and physically reserves the scratch cap. Guest
+  source requires non-root execution, cgroup-v2 memory/PID/CPU limits, seccomp, Landlock, read-only
+  policy, and no core dumps, but those controls have only static tests. Reproducible build, boot,
+  pressure, inode/file-count, and adversarial evidence is still missing.
+- The zero-NIC VM has no model access. A hard-disabled Codex parser and ledger scaffold separates
+  model output from CLI usage, but there is no authenticated provider process or durable broker
+  authority. The existing host Codex adapter cannot be relabeled as that mediator.
+- Controller-owned paths and hash chains do not resist another process under the same UID. The
+  hard-disabled broker protocol closes caller path/argv selection, and its separate journal model
+  specifies fsync-before-ack records, boot-bound genesis, rollback witnesses, replay/token recovery,
+  and restart quarantine. Neither is an implementation: the dedicated-UID launchd service,
+  descriptor-relative storage backend, root-owned rollback witness, full descriptor-native LFRQ
+  parser, and unforgeable mediator authorization are still absent.
 - Agent provider authentication is deployment-specific. Baking credentials into an image is unsafe.
   Prefer a model/tool broker or a provider CLI whose own sandbox keeps credentials outside tool
-  reach. The host backend is lower assurance.
+  reach. The host backend is lower assurance. In particular, the bundled Codex adapter uses the
+  logged-in host CLI's saved subscription authentication: it must not be treated as a credential
+  boundary for hostile code and is dry-run-only.
 - Secret regexes are not proof of absence. Production should add a dedicated scanner and entropy/
   historical-secret checks.
 - Sensitive-issue label and text matching is a conservative gate, not semantic proof that an issue
@@ -74,17 +119,23 @@ Do not describe these as solved:
 - The dashboard has no authentication or TLS and is therefore intentionally loopback-only. Do not
   reverse-proxy or publicly host it; use an authenticated SSH loopback forward when remote viewing is
   required.
-- Process-mode rehearsal is functional evidence, not a production sandbox claim. The optional macOS
-  Seatbelt wrapper broadly permits reads and is only supplemental; OCI mode remains the required
-  local production-faithful proof.
+- Process-mode and OCI rehearsals are functional evidence, not production sandbox claims. The
+  optional macOS Seatbelt wrapper broadly permits reads and is only supplemental.
+- The portable macOS package is not a strict-VM provisioner. It always stops after scouting and its
+  synthetic rehearsal; installing Docker/Podman or curating a repository does not enable model work.
 
 ## High-assurance deployment requirements
 
-Use a fresh VM/microVM per job, rootless runtime inside it, pinned image digests, immutable dependency
-bundles fetched without lifecycle scripts, a no-egress worker, canonical lstat-based tree comparison,
-a fresh verifier volume, signed/expiring approval attestation, just-in-time publisher token, encrypted
-audit storage, and a periodic label-scoped reaper. Never expose the host runtime socket or run an
+Before enabling production, complete the guest and controller integration described in
+[`vm/README.md`](vm/README.md): reproducible signed boot artifacts, non-root cgroup/seccomp/Landlock
+guest policy, in-guest acquisition and verification, no-general-egress model mediation, bounded
+post-stop result extraction, adversarial escape/resource tests, and cleanup receipts. Keep the
+publisher outside the guest with a just-in-time token. Never expose a host runtime socket or run an
 untrusted repository Dockerfile against it.
+
+Those controls can reduce attack surface and bound damage; they cannot prove that macOS,
+Virtualization.framework, the CPU, or the guest kernel contains no exploitable escape. Do not
+describe this project as completely isolated or absolutely escape-proof, even after integration.
 
 ## Reporting
 

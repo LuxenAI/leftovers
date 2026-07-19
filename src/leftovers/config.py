@@ -223,6 +223,61 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class StrictVMConfig:
+    """Pinned, bounded inputs for the future whole-cycle VM backend.
+
+    These values describe controller-owned artifacts and limits only.  There is
+    intentionally no command, environment, network, mount, endpoint, or
+    publication field in this section.
+    """
+
+    enabled: bool = False
+    profile: str = "darwin-vz-offline-v2"
+    launcher_path: str = ""
+    launcher_sha256: str = ""
+    boot_artifact_directory: str = ""
+    kernel_path: str = ""
+    kernel_sha256: str = ""
+    initrd_path: str = ""
+    initrd_sha256: str = ""
+    root_disk_path: str = ""
+    root_disk_sha256: str = ""
+    # This is an immutable canonical JSON artifact, not an operator-supplied
+    # digest.  The strict runner derives its digest only after validating that
+    # it binds the exact pinned boot artifacts.
+    guest_policy_path: str = ""
+    cpu_count: int = 2
+    memory_bytes: int = 2_147_483_648
+    scratch_bytes: int = 2_147_483_648
+    wall_time_seconds: int = 1_800
+    max_rounds: int = 8
+    max_actions_per_round: int = 24
+    max_request_bytes: int = 268_435_456
+    result_region_bytes: int = 16_777_216
+    max_observation_bytes: int = 262_144
+
+
+@dataclass(frozen=True)
+class MediatorConfig:
+    """Inference-only mediator identity and quotas.
+
+    No executable or endpoint is configurable here.  A concrete built-in
+    implementation must be separately reviewed before ``backend`` can grow a
+    production value.
+    """
+
+    backend: str = "disabled"
+    provider: str = "openai-subscription"
+    model: str = "gpt-5.6-terra"
+    reasoning_effort: str = "high"
+    max_calls: int = 12
+    per_call_timeout_seconds: int = 360
+    max_prompt_bytes: int = 262_144
+    max_response_bytes: int = 65_536
+    total_token_cap: int = 65_000
+
+
+@dataclass(frozen=True)
 class PublicationConfig:
     mode: str = "dry-run"
     external_writes_acknowledged: bool = False
@@ -272,7 +327,43 @@ class AppConfig:
     sandbox: SandboxConfig
     agent: AgentConfig
     publication: PublicationConfig
+    strict_vm: StrictVMConfig = field(default_factory=StrictVMConfig)
+    mediator: MediatorConfig = field(default_factory=MediatorConfig)
     repositories: tuple[RepositoryConfig, ...] = field(default_factory=tuple)
+
+
+def production_isolation_violations(config: AppConfig) -> tuple[str, ...]:
+    """Return configuration choices forbidden for unattended production work.
+
+    Host agents, networked workers, and ambient host environment forwarding are
+    still loadable so explicitly labeled training and rehearsal workflows keep
+    working.  The production orchestrator applies these stricter invariants
+    before budget admission, discovery, or resource acquisition.
+    """
+
+    violations: list[str] = []
+    if config.agent.backend == "host":
+        violations.append("agent.backend=host executes the model on the host")
+    if config.sandbox.network != "none":
+        violations.append("sandbox.network must be none")
+    networked_repositories = sorted(
+        repository.slug
+        for repository in config.repositories
+        if repository.enabled and repository.network not in {None, "none"}
+    )
+    if networked_repositories:
+        violations.append(
+            "repository network overrides must be none: " + ", ".join(networked_repositories)
+        )
+    if config.agent.pass_environment:
+        violations.append("agent.pass_environment must be empty")
+    if config.agent.backend != "strict-vm":
+        violations.append("agent.backend must be strict-vm for unattended production")
+    if not config.strict_vm.enabled:
+        violations.append("strict_vm.enabled must be true for unattended production")
+    if config.mediator.backend != "inference-only-v1":
+        violations.append("no credential-isolating inference-only mediator is implemented")
+    return tuple(violations)
 
 
 _SECTIONS = {
@@ -286,6 +377,8 @@ _SECTIONS = {
     "policy",
     "sandbox",
     "agent",
+    "strict_vm",
+    "mediator",
     "publication",
     "repositories",
 }
@@ -294,6 +387,29 @@ _REPOSITORY_SLUG = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100}"
 )
 _PINNED_IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@:+-]*@sha256:[0-9a-fA-F]{64}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_BYTE_SIZE = re.compile(r"([1-9][0-9]{0,9})([bkmg]?)")
+_BYTE_SIZE_MULTIPLIERS = {
+    "": 1,
+    "b": 1,
+    "k": 1 << 10,
+    "m": 1 << 20,
+    "g": 1 << 30,
+}
+
+
+def _bounded_byte_size(value: str, where: str, minimum: int, maximum: int) -> int:
+    """Parse the small, unambiguous byte-size subset accepted by Leftovers."""
+
+    match = _BYTE_SIZE.fullmatch(value)
+    if match is None:
+        raise ConfigError(
+            f"{where} must be a positive integer byte size with an optional b, k, m, or g suffix"
+        )
+    size = int(match.group(1)) * _BYTE_SIZE_MULTIPLIERS[match.group(2)]
+    if not minimum <= size <= maximum:
+        raise ConfigError(f"{where} is outside conservative byte-size bounds")
+    return size
 
 
 def _safe_git_ref(value: str) -> bool:
@@ -306,6 +422,21 @@ def _safe_git_ref(value: str) -> bool:
         and not any(token in value for token in forbidden)
         and not any(character.isspace() for character in value)
         and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
+
+
+def _safe_absolute_config_path(value: str) -> bool:
+    """Recognize a lexical, canonical absolute path without touching the host."""
+
+    if not value or len(value.encode("utf-8")) > 1_024 or "\0" in value:
+        return False
+    path = Path(value)
+    return (
+        path.is_absolute()
+        and value == str(path)
+        and value != "/"
+        and "//" not in value
+        and all(part not in {"", ".", ".."} for part in path.parts[1:])
     )
 
 
@@ -436,6 +567,8 @@ def load_config(path: str | Path) -> AppConfig:
     policy_raw = _section(data, "policy")
     sandbox_raw = _section(data, "sandbox")
     agent_raw = _section(data, "agent")
+    strict_vm_raw = _section(data, "strict_vm")
+    mediator_raw = _section(data, "mediator")
     publication_raw = _section(data, "publication")
 
     policy_raw = dict(policy_raw)
@@ -485,6 +618,8 @@ def load_config(path: str | Path) -> AppConfig:
         policy=_make(PolicyConfig, policy_raw, "policy"),
         sandbox=_make(SandboxConfig, sandbox_raw, "sandbox"),
         agent=_make(AgentConfig, agent_raw, "agent"),
+        strict_vm=_make(StrictVMConfig, strict_vm_raw, "strict_vm"),
+        mediator=_make(MediatorConfig, mediator_raw, "mediator"),
         publication=_make(PublicationConfig, publication_raw, "publication"),
         repositories=repositories,
     )
@@ -554,6 +689,20 @@ def _validate(config: AppConfig) -> None:
         raise ConfigError("sandbox.runtime must be docker or podman")
     if config.sandbox.network not in {"none", "bridge"}:
         raise ConfigError("sandbox.network must be none or bridge")
+    memory_bytes = _bounded_byte_size(
+        config.sandbox.memory,
+        "sandbox.memory",
+        64 << 20,
+        64 << 30,
+    )
+    tmpfs_bytes = _bounded_byte_size(
+        config.sandbox.tmpfs_size,
+        "sandbox.tmpfs_size",
+        1 << 20,
+        8 << 30,
+    )
+    if tmpfs_bytes > memory_bytes:
+        raise ConfigError("sandbox.tmpfs_size may not exceed sandbox.memory")
     if config.sandbox.cpus <= 0 or config.sandbox.pids_limit < 1:
         raise ConfigError("sandbox CPU and PID limits must be positive")
     if config.sandbox.timeout_seconds < 1:
@@ -568,12 +717,20 @@ def _validate(config: AppConfig) -> None:
         and 1 <= config.sandbox.timeout_seconds <= 7_200
     ):
         raise ConfigError("sandbox resource limits are outside conservative bounds")
-    if config.agent.backend not in {"container", "host"}:
-        raise ConfigError("agent.backend must be container or host")
-    if not config.agent.command:
-        raise ConfigError("agent.command must be a non-empty argv array")
-    if not config.agent.command[0].strip():
-        raise ConfigError("agent.command executable may not be empty")
+    if config.agent.backend not in {"container", "host", "strict-vm"}:
+        raise ConfigError("agent.backend must be container, host, or strict-vm")
+    if config.agent.backend == "strict-vm":
+        if config.agent.command:
+            raise ConfigError("strict-vm agents cannot accept a configurable command")
+        if config.agent.pass_environment:
+            raise ConfigError("strict-vm agents cannot inherit host environment variables")
+        if not config.strict_vm.enabled:
+            raise ConfigError("agent.backend=strict-vm requires strict_vm.enabled=true")
+    else:
+        if not config.agent.command:
+            raise ConfigError("agent.command must be a non-empty argv array")
+        if not config.agent.command[0].strip():
+            raise ConfigError("agent.command executable may not be empty")
     for field_name, value in (
         ("provider", config.agent.provider),
         ("model", config.agent.model),
@@ -627,14 +784,106 @@ def _validate(config: AppConfig) -> None:
             "the coding agent may not receive GitHub or runtime-control credentials: "
             + ", ".join(sorted(exposed))
         )
+    strict = config.strict_vm
+    if strict.profile != "darwin-vz-offline-v2":
+        raise ConfigError("strict_vm.profile must be darwin-vz-offline-v2")
+    strict_paths = {
+        "launcher_path": strict.launcher_path,
+        "boot_artifact_directory": strict.boot_artifact_directory,
+        "kernel_path": strict.kernel_path,
+        "initrd_path": strict.initrd_path,
+        "root_disk_path": strict.root_disk_path,
+        "guest_policy_path": strict.guest_policy_path,
+    }
+    strict_digests = {
+        "launcher_sha256": strict.launcher_sha256,
+        "kernel_sha256": strict.kernel_sha256,
+        "initrd_sha256": strict.initrd_sha256,
+        "root_disk_sha256": strict.root_disk_sha256,
+    }
+    if strict.enabled:
+        if config.agent.backend != "strict-vm":
+            raise ConfigError("strict_vm.enabled=true requires agent.backend=strict-vm")
+        missing = sorted(
+            name for name, value in (*strict_paths.items(), *strict_digests.items()) if not value
+        )
+        if missing:
+            raise ConfigError(
+                "enabled strict_vm requires pinned paths and digests: " + ", ".join(missing)
+            )
+    for name, value in strict_paths.items():
+        if value and not _safe_absolute_config_path(value):
+            raise ConfigError(f"strict_vm.{name} must be a canonical absolute path")
+    for name, value in strict_digests.items():
+        if value and _SHA256.fullmatch(value) is None:
+            raise ConfigError(f"strict_vm.{name} must be lowercase SHA-256")
+    if strict.boot_artifact_directory:
+        boot_directory = Path(strict.boot_artifact_directory)
+        for name in ("kernel_path", "initrd_path", "root_disk_path", "guest_policy_path"):
+            value = getattr(strict, name)
+            if value and Path(value).parent != boot_directory:
+                raise ConfigError(
+                    f"strict_vm.{name} must be a direct child of boot_artifact_directory"
+                )
+    if not (
+        1 <= strict.cpu_count <= 4
+        and 512 << 20 <= strict.memory_bytes <= 4 << 30
+        and strict.memory_bytes % (1 << 20) == 0
+        and 64 << 20 <= strict.scratch_bytes <= 4 << 30
+        and strict.scratch_bytes % (1 << 20) == 0
+        and 30 <= strict.wall_time_seconds <= 3_600
+    ):
+        raise ConfigError("strict_vm hardware limits are outside launcher bounds")
+    if not (
+        1 <= strict.max_rounds <= 32
+        and 1 <= strict.max_actions_per_round <= 32
+        and 4_096 <= strict.max_request_bytes <= 256 << 20
+        and strict.max_request_bytes % 512 == 0
+        and 1 << 20 <= strict.result_region_bytes <= 64 << 20
+        and strict.result_region_bytes % 4_096 == 0
+        and strict.result_region_bytes < strict.scratch_bytes
+        and 1_024 <= strict.max_observation_bytes <= 256 << 10
+        and strict.max_observation_bytes < strict.result_region_bytes
+    ):
+        raise ConfigError("strict_vm protocol limits are outside conservative bounds")
+    if config.mediator.backend not in {"disabled", "fixture"}:
+        raise ConfigError(
+            "mediator.backend has no reviewed production implementation; use disabled or fixture"
+        )
+    for name, value in (
+        ("provider", config.mediator.provider),
+        ("model", config.mediator.model),
+        ("reasoning_effort", config.mediator.reasoning_effort),
+    ):
+        if (
+            not value.strip()
+            or len(value) > 128
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ConfigError(f"mediator.{name} must be a bounded printable identifier")
+    if config.mediator.reasoning_effort not in {"low", "medium", "high"}:
+        raise ConfigError("mediator.reasoning_effort is unsupported")
+    if not (
+        1 <= config.mediator.max_calls <= 64
+        and 1 <= config.mediator.per_call_timeout_seconds <= 1_800
+        and 1_024 <= config.mediator.max_prompt_bytes <= 4 << 20
+        and 1_024 <= config.mediator.max_response_bytes <= 1 << 20
+        and 1 <= config.mediator.total_token_cap <= 10_000_000
+    ):
+        raise ConfigError("mediator limits are outside conservative bounds")
+    if config.mediator.backend == "fixture" and config.agent.backend != "strict-vm":
+        raise ConfigError("the fixture mediator is only valid with agent.backend=strict-vm")
     if config.publication.mode not in {"dry-run", "draft-pr"}:
         raise ConfigError("publication.mode must be dry-run or draft-pr")
     if not config.publication.require_cli_flag:
         raise ConfigError("v1 requires publication.require_cli_flag = true")
     if config.publication.mode == "draft-pr" and not config.publication.draft:
         raise ConfigError("v1 only publishes draft PRs")
-    if config.publication.mode == "draft-pr" and config.agent.backend != "container":
-        raise ConfigError("draft publication requires the container agent backend")
+    if config.publication.mode == "draft-pr" and config.agent.backend not in {
+        "container",
+        "strict-vm",
+    }:
+        raise ConfigError("draft publication requires a container or strict-vm agent backend")
     if (
         config.publication.mode == "draft-pr"
         and _PINNED_IMAGE.fullmatch(config.sandbox.image) is None

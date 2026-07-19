@@ -1,9 +1,42 @@
 # Agent adapters
 
-Leftovers v0.1 defines a provider-neutral process contract; it does **not** ship a runnable OpenAI,
-Anthropic, local-model, or other provider adapter. The stock sandbox image supplies the execution
-environment only. A deployment must build and review its own adapter before `run --execute` can
-complete.
+Leftovers defines a provider-neutral process contract. The stock sandbox image supplies the
+rehearsal environment only. Container or host adapters cannot currently pass production admission;
+a future deployment must integrate them behind the strict VM boundary before it can publish.
+
+For deterministic adapter testing, the repository also ships `scripts/codex_adapter.py`: a
+**host-agent, rehearsal-only** adapter for the headless Codex CLI. It pins the model to
+`gpt-5.6-terra` and reasoning effort to `high`; it is not a general OpenAI API adapter and it does not
+turn a consumer subscription into a measurable token balance.
+
+## Bundled Codex host-preview adapter
+
+The adapter remains selected in the macOS package template for schema/config compatibility. It requires a
+saved Codex CLI login and a Codex CLI at version `0.144.5` or newer. The desktop app/chat does not
+need to remain running after installation; the CLI binary and its existing saved authentication must
+remain available to the logged-in user.
+
+For each planning, implementation, or review stage it runs `codex exec` with an ephemeral session,
+strict config, ignored user/rule files, disabled plugins and interactive tools, no inherited shell
+environment, `approval_policy = "never"`, disabled workspace network access, a strict JSON schema,
+and a bounded JSONL usage receipt. Hard limits are 6 minutes for planning, 20 minutes for
+implementation, and 8 minutes for review. The adapter enforces private output paths, bounded
+prompt/events/diagnostics, process-group termination, and exact token arithmetic before reporting
+usage to the controller.
+
+Those controls are useful for tests, not a substitute for a separate trust boundary:
+
+- The Codex process runs on the host and uses the host's saved subscription authentication.
+- The adapter cannot receive GitHub credentials and cannot push, comment, fork, or open a PR.
+- Configuration validation rejects host-agent use for `draft-pr` publication. The portable macOS
+  bundle always renders `publication.mode = "dry-run"` and `external_writes_acknowledged = false`.
+- The macOS launchd job does not receive `CODEX_HOME` or `LEFTOVERS_CODEX_BIN`, has a hard execution
+  deny gate, and never invokes `run --execute` or `--publish`.
+- The production orchestrator rejects host backends before budget, discovery, clone, or model work.
+
+Use it only with the limits in [`MACOS_PACKAGE.md`](MACOS_PACKAGE.md) and the risk model in
+[`../SECURITY.md`](../SECURITY.md). A production implementation still needs the strict VM guest and
+a narrow model mediator that keeps provider credentials outside untrusted repository code.
 
 ## Process contract
 
@@ -33,10 +66,10 @@ fresh and timezone-aware, and usage arithmetic must reconcile. Do not place prom
 credentials, paths, logs, or exceptions in this channel. See [`TELEMETRY.md`](TELEMETRY.md) for
 qualification and dashboard semantics.
 
-## Container adapter checklist
+## OCI rehearsal adapter checklist
 
 - Derive from `sandbox/Dockerfile`, add one reviewed executable, and set `agent.command` to it.
-- Pin the final image by immutable digest before unattended use; `latest` is a development warning.
+- Pin the final image by immutable digest before rehearsal; `latest` is a development warning.
 - Ensure the image is already present locally. The runner uses `--pull=never`.
 - Do not install or invoke `gh`, mount the runtime socket, mount host credential directories, or add
   GitHub credentials to `agent.pass_environment`.
@@ -52,12 +85,19 @@ validation rejects GitHub tokens, SSH-agent sockets, and runtime sockets. That a
 a direct provider secret safe: the coding agent can execute untrusted repository code in the same
 container, and a networked stage could expose the secret.
 
-For higher assurance, use an external model/tool broker that keeps provider credentials outside the
-worker and exposes only the minimum inference operation. A provider CLI on the host may keep its
-credential outside the repository container, but `agent.backend = "host"` is the lower-assurance
-profile and cannot be used with v0.1 draft publication. Direct provider credentials plus bridge
-networking should be limited to curated, explicitly risk-accepted dry runs; `network = "none"`
-cannot reach a hosted model API.
+The strict VM has no NIC or socket, so a generic external broker is not yet available. Any future
+mediator must keep credentials outside the worker, expose only bounded inference semantics, and
+avoid general egress or a host-command channel. A provider CLI on the host cannot satisfy that
+boundary merely because its tool subprocesses use a sandbox. Production also rejects direct
+provider environment variables and every bridge-network override.
 
-Do not claim autonomous operation until the chosen adapter, credential topology, image digest,
-network policy, and all stage outputs have been exercised in execute-only runs with no remote write.
+[`CODEX_CLI_MEDIATOR.md`](CODEX_CLI_MEDIATOR.md) records a separate hard-disabled Codex
+subscription mediator protocol: canonical provider envelopes, controller-derived patch digests,
+exact usage arithmetic, and crash-conservative hash-chained token reservations. It does **not**
+make the CLI runnable. Activation requires official version-pinned proof that every model tool
+surface is disabled and a credential topology that never reaches the VM guest.
+
+Do not claim autonomous operation until the strict VM guest, narrow credential-isolating model mediator,
+bounded result extractor, chosen adapter, and cleanup path are integrated and exercised with live
+adversarial evidence and no remote write. Adapter or OCI rehearsal checks alone do not authorize
+production.

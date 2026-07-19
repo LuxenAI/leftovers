@@ -1,0 +1,100 @@
+{
+  "evidence_version": 1,
+  "observed_at": "2026-07-18T23:26:08.000Z",
+  "purpose": "Non-production live proof of the fixed Virtualization.framework device graph and bounded guest-to-scratch shutdown path.",
+  "host": {
+    "architecture": "arm64",
+    "macos_build": "25D771280a",
+    "macos_version": "26.3.1 (a)"
+  },
+  "source_identity": {
+    "entitlements_sha256": "5c1c6753b84cc1a1349de2a465074f166b5a47bade536b231683c22f53072259",
+    "launcher_sha256": "1a4efbc68da0c7a8cbfb55b6e9f43cdf740ed3cc07a37baa3798f0ca54cfeabb",
+    "smoke_init_sha256": "877b789f8eddafe393c6e24d73efcbe9349dc5ec6286cfa6aa3935511bdb18e5"
+  },
+  "fixture_artifacts": {
+    "alpine_release": "3.24.1",
+    "custom_initramfs_bytes": 9403565,
+    "custom_initramfs_sha256": "319fd69194e0d1d535ff3ac1a974bff0b6616c3bfd88cf5e0f16b1aaa36b55f2",
+    "kernel_raw_bytes": 36110336,
+    "kernel_raw_sha256": "8b216f74e7f89def4604adf69e2345437363aff4819101bb1551c9e83cd35cdd",
+    "official_netboot_directory": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/netboot-3.24.1/",
+    "root_disk_bytes": 1048576,
+    "root_disk_sha256": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58"
+  },
+  "launcher_receipt": {
+    "artifacts": {
+      "initrd_sha256": "319fd69194e0d1d535ff3ac1a974bff0b6616c3bfd88cf5e0f16b1aaa36b55f2",
+      "kernel_sha256": "8b216f74e7f89def4604adf69e2345437363aff4819101bb1551c9e83cd35cdd",
+      "request_disk_sha256": null,
+      "root_disk_sha256": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58"
+    },
+    "config_validated": true,
+    "devices": {
+      "audio_devices": 0,
+      "boot_loader": "linux",
+      "console_devices": 0,
+      "directory_shares": 0,
+      "entropy_devices": 0,
+      "graphics_devices": 0,
+      "keyboards": 0,
+      "memory_balloon_devices": 0,
+      "network_devices": 0,
+      "platform": "generic",
+      "pointing_devices": 0,
+      "serial_ports": 0,
+      "socket_devices": 0,
+      "storage_devices": [
+        {
+          "kind": "virtio-block",
+          "read_only": true,
+          "role": "root",
+          "size_bytes": 1048576
+        },
+        {
+          "kind": "virtio-block",
+          "read_only": false,
+          "role": "scratch",
+          "size_bytes": 67108864
+        }
+      ],
+      "usb_controllers": 0
+    },
+    "error_code": null,
+    "finished_at": "2026-07-18T23:26:08.000Z",
+    "launcher_version": "0.2.0-proof",
+    "limits": {
+      "cpu_count": 1,
+      "memory_bytes": 536870912,
+      "scratch_bytes": 67108864,
+      "wall_time_seconds": 60
+    },
+    "mode": "run",
+    "run_id": "live-smoke-20260718",
+    "schema_version": 1,
+    "scratch_retained": true,
+    "started_at": "2026-07-18T23:26:07.812Z",
+    "status": "guest_stopped",
+    "stop_reason": "guest_shutdown"
+  },
+  "guest_scratch_receipt": {
+    "complete": true,
+    "guest_pid": 1,
+    "network_interfaces": [
+      "lo"
+    ],
+    "request_device_present": false,
+    "root_read_only": true,
+    "scratch_read_only": false,
+    "virtio_devices": [
+      "virtio0",
+      "virtio1"
+    ]
+  },
+  "limitations": [
+    "The Alpine-derived fixture was assembled manually for this smoke and is not a reviewed or reproducible production guest image.",
+    "This proves the configured virtual device graph and one guest observation; it is not third-party attestation and cannot prove the absence of hypervisor, kernel, firmware, or CPU vulnerabilities.",
+    "No model, repository, host share, credential, request disk, network interface, socket, console, or publisher was present.",
+    "Production execution remains disabled until a reviewed guest, credential-isolating model mediator, bounded result verifier, and external cleanup controller are integrated and adversarially tested."
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "recorded_at": "2026-07-19T00:26:00Z",
+  "verification": "Each immutable Git object ID is verified with git ls-remote before the build. Releases must also be verified against the upstream signed tag before any artifact is admitted to the boot trust domain.",
+  "sources": [
+    {
+      "name": "buildroot",
+      "purpose": "reproducible aarch64 guest build system",
+      "repository": "https://gitlab.com/buildroot.org/buildroot.git",
+      "ref": "refs/tags/2026.05.1",
+      "tag_object": "de1f9260590a53a7cd8a59addc47c96ecd09f983",
+      "hash_algorithm": "git-sha1",
+      "release_date": "2026-07-15",
+      "release_page": "https://buildroot.org/download.html",
+      "tag_verification": {
+        "required": true,
+        "method": "git-verify-tag",
+        "trusted_keyring": "BUILD.lock.json:trusted_keyring",
+        "expected_signer_fingerprint": null,
+        "status": "UNCONFIGURED"
+      }
+    },
+    {
+      "name": "linux-stable",
+      "purpose": "aarch64 guest kernel source",
+      "repository": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+      "ref": "refs/tags/v6.12.87",
+      "tag_object": "669dc96e243e422e7404bb98be00d527bafc0a96",
+      "hash_algorithm": "git-sha1",
+      "release_date": "2026-05-08",
+      "release_page": "https://www.kernel.org/releases.html",
+      "tag_verification": {
+        "required": true,
+        "method": "git-verify-tag",
+        "trusted_keyring": "BUILD.lock.json:trusted_keyring",
+        "expected_signer_fingerprint": null,
+        "status": "UNCONFIGURED"
+      }
+    }
+  ]
+}

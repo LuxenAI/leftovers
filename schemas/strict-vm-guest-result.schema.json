@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.invalid/schemas/strict-vm-guest-result.schema.json",
+  "title": "Leftovers strict VM guest tail result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "round", "stage", "sections"],
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "round": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "stage": {"enum": ["planning", "implementation", "review", "final_verify"]},
+    "sections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guest_receipt", "observations", "canonical_patch", "checks", "stage_result"],
+      "properties": {
+        "guest_receipt": {"$ref": "#/$defs/guestReceipt"},
+        "observations": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/observation"}
+        },
+        "canonical_patch": {"type": "string"},
+        "checks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/check"}
+        },
+        "stage_result": {"$ref": "#/$defs/stageResult"}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "guestReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "run_id", "round", "stage", "request_sha256", "guest_policy_sha256", "isolation"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "round": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "stage": {"enum": ["planning", "implementation", "review", "final_verify"]},
+        "request_sha256": {"$ref": "#/$defs/digest"},
+        "guest_policy_sha256": {"$ref": "#/$defs/digest"},
+        "isolation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "network", "host_shares", "credential_files", "uid", "no_new_privs", "seccomp", "landlock", "cgroup_v2", "pid1", "root_read_only"],
+          "properties": {
+            "schema_version": {"const": 1},
+            "network": {"const": "absent"},
+            "host_shares": {"const": 0},
+            "credential_files": {"const": 0},
+            "uid": {"const": 65534},
+            "no_new_privs": {"const": true},
+            "seccomp": {"const": true},
+            "landlock": {"const": true},
+            "cgroup_v2": {"const": true},
+            "pid1": {"const": true},
+            "root_read_only": {"const": true}
+          }
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "status", "truncated", "tail"],
+      "properties": {
+        "action_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "status": {"enum": ["complete", "blocked", "failed"]},
+        "truncated": {"type": "boolean"},
+        "tail": {"type": "string", "maxLength": 16384}
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check_id", "exit", "timed_out", "truncated", "tail"],
+      "properties": {
+        "check_id": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"},
+        "exit": {"type": ["integer", "null"], "minimum": -255, "maximum": 255},
+        "timed_out": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "tail": {"type": "string", "maxLength": 16384}
+      }
+    },
+    "stageResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary", "action_ids", "cumulative_patch_sha256"],
+      "properties": {
+        "status": {"enum": ["complete", "blocked", "failed"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "action_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+          "uniqueItems": true
+        },
+        "cumulative_patch_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+      }
+    }
+  }
+}

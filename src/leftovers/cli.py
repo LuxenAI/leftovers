@@ -15,22 +15,29 @@ from .audit import redact
 from .budget import BudgetLedger
 from .config import AppConfig, ConfigError, load_config
 from .dashboard import DashboardUnavailable, serve_dashboard
-from .github import FixtureIssueSource, GitHubClient, GitHubError
+from .github import (
+    FixtureIssueSource,
+    GitHubClient,
+    GitHubError,
+    RepositorySupplyCriteria,
+)
 from .models import RunStage
 from .orchestrator import ContributionOrchestrator, ranked_to_dict
 from .publisher import GhPublisher, PublicationError
 from .rehearsal import (
     REHEARSAL_IMAGE,
     RehearsalError,
+    _controller_command,
     run_rehearsal,
     seatbelt_argv,
 )
-from .runner import AgentRunner, RunnerError
+from .runner import AgentRunner, RunnerCleanupError, RunnerError
 from .statefs import PrivateStateError, private_directory
 from .telemetry import TelemetryError, TelemetryReader
 from .workspace import WorkspaceError, reap_expired
 
 _SEATBELT_CHILD = "LEFTOVERS_REHEARSAL_SEATBELT_CHILD"
+_RUN_ID = __import__("re").compile(r"[a-f0-9]{32}")
 
 
 def _bounded_integer(minimum: int, maximum: int, label: str) -> Any:
@@ -41,6 +48,19 @@ def _bounded_integer(minimum: int, maximum: int, label: str) -> Any:
             raise argparse.ArgumentTypeError(f"{label} must be an integer") from exc
         if not minimum <= parsed <= maximum:
             raise argparse.ArgumentTypeError(f"{label} must be between {minimum} and {maximum}")
+        return parsed
+
+    return parse
+
+
+def _bounded_float(minimum: float, maximum: float, label: str) -> Any:
+    def parse(value: str) -> float:
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"{label} must be a number") from exc
+        if not minimum <= parsed <= maximum:
+            raise argparse.ArgumentTypeError(f"{label} must be between {minimum:g} and {maximum:g}")
         return parsed
 
     return parse
@@ -67,6 +87,67 @@ def _parser() -> argparse.ArgumentParser:
     scout.add_argument("--fixture", type=Path, help="read issues from a local JSON fixture")
     scout.add_argument("--eligible-only", action="store_true")
 
+    repo_scout = subparsers.add_parser(
+        "repo-scout",
+        help="nominate issue-rich, PR-constrained repositories for manual curation",
+    )
+    repo_scout.add_argument(
+        "--min-stars", type=_bounded_integer(1, 100_000, "minimum stars"), default=100
+    )
+    repo_scout.add_argument(
+        "--max-stars", type=_bounded_integer(1, 1_000_000, "maximum stars"), default=3_000
+    )
+    repo_scout.add_argument(
+        "--min-open-issues",
+        type=_bounded_integer(1, 10_000, "minimum open issues"),
+        default=30,
+    )
+    repo_scout.add_argument(
+        "--max-open-issues",
+        type=_bounded_integer(1, 10_000, "maximum open issues"),
+        default=200,
+    )
+    repo_scout.add_argument(
+        "--max-open-prs",
+        type=_bounded_integer(0, 10_000, "maximum open PRs"),
+        default=12,
+    )
+    repo_scout.add_argument(
+        "--min-ratio",
+        type=_bounded_float(1, 1_000, "minimum issue-to-PR ratio"),
+        default=8.0,
+    )
+    repo_scout.add_argument(
+        "--pushed-within-days",
+        type=_bounded_integer(1, 365, "activity window"),
+        default=90,
+    )
+    repo_scout.add_argument(
+        "--fresh-issue-days",
+        type=_bounded_integer(1, 365, "fresh issue window"),
+        default=180,
+    )
+    repo_scout.add_argument(
+        "--min-fresh-invited-issues",
+        type=_bounded_integer(1, 100, "minimum fresh invited issues"),
+        default=3,
+    )
+    repo_scout.add_argument(
+        "--min-recent-human-activity",
+        type=_bounded_integer(0, 100, "minimum recent human activity"),
+        default=2,
+    )
+    repo_scout.add_argument(
+        "--scan",
+        type=_bounded_integer(1, 50, "repository scan limit"),
+        default=25,
+    )
+    repo_scout.add_argument(
+        "--limit",
+        type=_bounded_integer(1, 50, "result limit"),
+        default=10,
+    )
+
     run = subparsers.add_parser("run", help="run one bounded contribution cycle")
     run.add_argument(
         "--fixture", type=Path, help="use a local issue fixture; publication is disabled"
@@ -85,6 +166,10 @@ def _parser() -> argparse.ArgumentParser:
         "--remaining-tokens",
         type=int,
         help="manual remaining-quota snapshot for this run",
+    )
+    run.add_argument(
+        "--run-id",
+        help="controller-owned 32-character hexadecimal run identity (advanced use)",
     )
 
     cleanup = subparsers.add_parser("cleanup", help="reap expired, exactly-marked local workspaces")
@@ -171,7 +256,13 @@ def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
     add(
         "sandbox_runtime",
         runtime_present,
-        f"{config.sandbox.runtime} is required for container-agent and verification stages",
+        f"{config.sandbox.runtime} is required only for OCI rehearsal and verification stages",
+    )
+    add(
+        "strict_vm_execution",
+        False,
+        "production execution is disabled until the no-NIC per-run VM runner and guest "
+        "artifact handoff are integrated and live-attested",
     )
     add(
         "pinned_image",
@@ -182,7 +273,7 @@ def _doctor(config: AppConfig) -> tuple[bool, list[dict[str, Any]]]:
     add(
         "agent_backend",
         config.agent.backend == "container",
-        "host agents rely on the provider CLI's own sandbox and are a lower-assurance profile",
+        "host agents are rehearsal-only and are rejected by unattended production admission",
         severity="warning",
     )
     add(
@@ -279,6 +370,23 @@ def _training_root(config: AppConfig, internal_root: Path | None) -> Path:
     return parent / f"training-{uuid.uuid4().hex}"
 
 
+def _seatbelt_child_environment(root: Path) -> dict[str, str]:
+    """Build a minimal child environment with no host credential locations or values."""
+
+    environment = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "HOME": str(root),
+        "TMPDIR": str(root),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        _SEATBELT_CHILD: "1",
+    }
+    for name in ("LANG", "LC_ALL", "LC_CTYPE"):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
 def _training_payload(args: argparse.Namespace, config: AppConfig) -> tuple[int, dict[str, Any]]:
     root = _training_root(config, args.internal_root)
     if args.mode in {"docker", "podman"}:
@@ -303,9 +411,7 @@ def _training_payload(args: argparse.Namespace, config: AppConfig) -> tuple[int,
         # startup.
         root = private_directory(root)
         command = (
-            sys.executable,
-            "-m",
-            "leftovers",
+            *_controller_command(),
             "--config",
             str(args.config),
             "training-run",
@@ -318,10 +424,7 @@ def _training_payload(args: argparse.Namespace, config: AppConfig) -> tuple[int,
             "--internal-root",
             str(root),
         )
-        environment = os.environ.copy()
-        environment[_SEATBELT_CHILD] = "1"
-        environment["TMPDIR"] = str(root)
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment = _seatbelt_child_environment(root)
         wrapped = seatbelt_argv(
             root=root,
             state_dir=root / "state",
@@ -360,8 +463,8 @@ def _training_payload(args: argparse.Namespace, config: AppConfig) -> tuple[int,
             raise RehearsalError("Seatbelt rehearsal returned an invalid result shape")
         child_payload["profile_requested"] = args.profile
         child_payload["assurance"] = (
-            "supplemental macOS Seatbelt process rehearsal; "
-            "the OCI container rehearsal remains authoritative"
+            "supplemental macOS Seatbelt process rehearsal; host and OCI profiles are "
+            "rehearsal-only and cannot authorize production execution"
         )
         return (0 if child_payload["success"] else 3), child_payload
 
@@ -440,19 +543,82 @@ def main(argv: list[str] | None = None) -> int:
                 ranked = [candidate for candidate in ranked if candidate.eligible]
             print(json.dumps({"candidates": [ranked_to_dict(item) for item in ranked]}, indent=2))
             return 0
+        if args.command == "repo-scout":
+            if args.max_stars < args.min_stars:
+                raise ConfigError("--max-stars cannot be less than --min-stars")
+            if args.max_open_issues < args.min_open_issues:
+                raise ConfigError("--max-open-issues cannot be less than --min-open-issues")
+            if args.limit > args.scan:
+                raise ConfigError("--limit cannot exceed --scan")
+            criteria = RepositorySupplyCriteria(
+                min_stars=args.min_stars,
+                max_stars=args.max_stars,
+                min_open_issues=args.min_open_issues,
+                max_open_issues=args.max_open_issues,
+                max_open_prs=args.max_open_prs,
+                min_issue_pr_ratio=args.min_ratio,
+                pushed_within_days=args.pushed_within_days,
+                fresh_issue_days=args.fresh_issue_days,
+                min_fresh_invited_issues=args.min_fresh_invited_issues,
+                min_recent_human_activity=args.min_recent_human_activity,
+                scan_limit=args.scan,
+                result_limit=args.limit,
+            )
+            candidates = GitHubClient(config.github).discover_repository_supply(criteria)
+            print(
+                json.dumps(
+                    {
+                        "mode": "read-only-nomination",
+                        "execution_authorized": False,
+                        "criteria": {
+                            "min_stars": criteria.min_stars,
+                            "max_stars": criteria.max_stars,
+                            "min_open_issues": criteria.min_open_issues,
+                            "max_open_issues": criteria.max_open_issues,
+                            "max_open_prs": criteria.max_open_prs,
+                            "min_issue_pr_ratio": criteria.min_issue_pr_ratio,
+                            "pushed_within_days": criteria.pushed_within_days,
+                            "fresh_issue_days": criteria.fresh_issue_days,
+                            "min_fresh_invited_issues": criteria.min_fresh_invited_issues,
+                            "min_recent_human_activity": criteria.min_recent_human_activity,
+                            "scan_limit": criteria.scan_limit,
+                            "result_limit": criteria.result_limit,
+                        },
+                        "candidates": [candidate.to_dict() for candidate in candidates],
+                    },
+                    indent=2,
+                )
+            )
+            return 0
         if args.command == "run":
             if args.publish and args.fixture:
                 raise ConfigError("--publish cannot be used with --fixture")
+            if args.run_id is not None and _RUN_ID.fullmatch(args.run_id) is None:
+                raise ConfigError("--run-id must be exactly 32 lowercase hexadecimal characters")
             source = _source(config, args.fixture)
             outcome = ContributionOrchestrator(config, source).run(
                 execute_work=args.execute or args.publish,
                 publish=args.publish,
                 remaining_tokens=args.remaining_tokens,
+                run_id=args.run_id,
             )
             print(json.dumps(outcome.to_dict(), indent=2))
             successful = {RunStage.COMPLETE, RunStage.SELECTED, RunStage.SKIPPED}
             return 0 if outcome.stage in successful else 3
         raise AssertionError("unreachable command")
+    except RunnerCleanupError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                    "process_group": exc.process_group,
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     except (
         ConfigError,
         DashboardUnavailable,

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import redact
+from .cancellation import raise_if_cancelled
 from .config import AgentConfig, SandboxConfig
 from .models import AgentResult, CommandResult, TokenUsage, isoformat, utc_now
 from .prompts import RenderedPrompt
@@ -25,6 +26,16 @@ from .prompts import RenderedPrompt
 
 class RunnerError(RuntimeError):
     pass
+
+
+class RunnerCleanupError(RunnerError):
+    """The runner could not prove that its owned process group is gone."""
+
+    def __init__(self, message: str, process_group: int):
+        if type(process_group) is not int or process_group <= 0:
+            raise ValueError("cleanup failure process group must be a positive integer")
+        super().__init__(message)
+        self.process_group = process_group
 
 
 class AgentOutputError(RunnerError):
@@ -43,6 +54,103 @@ _TELEMETRY_SOURCES = {
 _TELEMETRY_MAX_BYTES = 65_536
 _TELEMETRY_MAX_LINE_BYTES = 4_096
 _TELEMETRY_MAX_EVENTS = 1_024
+_RUNNER_PROCESS_GROUP_ENV = "LEFTOVERS_RUNNER_OWNS_PROCESS_GROUP"
+_TERMINATION_GRACE_SECONDS = 5.0
+_KILL_CONFIRM_SECONDS = 2.0
+
+
+def _process_group_is_alive(process: subprocess.Popen[bytes], process_group: int) -> bool:
+    """Return whether a runner-created session still contains a process.
+
+    ``Popen.poll()`` only observes the session leader.  A leader can exit with
+    descendants still holding pipes or running arbitrary code, so runner
+    cleanup must always inspect the process group itself.
+    """
+
+    # Refresh the direct-child status before interpreting a platform-specific
+    # EPERM from killpg(2).  This closes the small reap race after SIGKILL.
+    process.poll()
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError as exc:
+        # macOS may report EPERM for a just-reaped process group after the
+        # leader has been collected.  The leader's wait status is the only
+        # observable member we created in that case; while it is live, fail
+        # closed because group liveness is not provable.
+        if process.poll() is not None:
+            return False
+        raise RunnerCleanupError(
+            "cannot inspect the runner-owned process group", process_group
+        ) from exc
+    except OSError as exc:
+        raise RunnerCleanupError(
+            "cannot inspect the runner-owned process group", process_group
+        ) from exc
+    return True
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen[bytes], process_group: int, deadline: float
+) -> bool:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            if not _process_group_is_alive(process, process_group):
+                break
+        except RunnerError:
+            # A just-signalled Darwin group can transiently report EPERM while
+            # its leader is between exit and reap.  Keep the bounded wait in
+            # force rather than treating that race as successful cleanup.
+            pass
+        time.sleep(min(0.05, remaining))
+    try:
+        process.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _signal_runner_process_group(process_group: int, received: signal.Signals) -> None:
+    try:
+        os.killpg(process_group, received)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise RunnerCleanupError(
+            "cannot signal the runner-owned process group", process_group
+        ) from exc
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Boundedly stop and prove removal of the runner-owned process group."""
+
+    process_group = process.pid
+    if not _process_group_is_alive(process, process_group):
+        try:
+            process.wait(timeout=_KILL_CONFIRM_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise RunnerCleanupError(
+                "runner process leader could not be reaped", process_group
+            ) from exc
+        return
+
+    _signal_runner_process_group(process_group, signal.SIGTERM)
+    if _wait_for_process_group_exit(
+        process, process_group, time.monotonic() + _TERMINATION_GRACE_SECONDS
+    ):
+        return
+
+    _signal_runner_process_group(process_group, signal.SIGKILL)
+    if not _wait_for_process_group_exit(
+        process, process_group, time.monotonic() + _KILL_CONFIRM_SECONDS
+    ):
+        raise RunnerCleanupError(
+            "runner-owned process group could not be terminated", process_group
+        )
 
 
 def _parse_observed_at(value: object) -> datetime:
@@ -348,16 +456,7 @@ def execute(
     tick_seconds: float = 0.5,
 ) -> CommandResult:
     started = time.monotonic()
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-        start_new_session=True,
-    )
+    process: subprocess.Popen[bytes] | None = None
     stdout_buffer = bytearray()
     stderr_buffer = bytearray()
 
@@ -371,17 +470,8 @@ def execute(
             if overflow > 0:
                 del target[:overflow]
 
-    stdout_thread = threading.Thread(
-        target=drain, args=(process.stdout, stdout_buffer), daemon=True
-    )
-    stderr_thread = threading.Thread(
-        target=drain, args=(process.stderr, stderr_buffer), daemon=True
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-
     def write_stdin() -> None:
-        if stdin is None or process.stdin is None:
+        if stdin is None or process is None or process.stdin is None:
             return
         try:
             process.stdin.write(stdin.encode())
@@ -389,42 +479,105 @@ def execute(
         except (BrokenPipeError, OSError):
             pass
 
-    stdin_thread = threading.Thread(target=write_stdin, daemon=True)
-    stdin_thread.start()
     timed_out = False
     callback_error: Exception | None = None
     deadline = started + timeout
+    stdout_thread: threading.Thread | None = None
+    stderr_thread: threading.Thread | None = None
+    stdin_thread: threading.Thread | None = None
+    child_env = dict(env)
+    # This marker is set by the controller after the process group identity is
+    # fixed.  Adapters use it to keep their child inside this same group rather
+    # than guessing from their ambient terminal state.
+    child_env[_RUNNER_PROCESS_GROUP_ENV] = "1"
+    primary_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=child_env,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            start_new_session=True,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        stdout_thread = threading.Thread(
+            target=drain, args=(process.stdout, stdout_buffer), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=drain, args=(process.stderr, stderr_buffer), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        stdin_thread = threading.Thread(target=write_stdin, daemon=True)
+        stdin_thread.start()
+        raise_if_cancelled()
         while process.poll() is None:
+            raise_if_cancelled()
             if on_tick is not None:
                 try:
                     on_tick()
                 except Exception as exc:
                     callback_error = exc
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
                     break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
                 break
             try:
                 process.wait(timeout=min(tick_seconds, remaining))
             except subprocess.TimeoutExpired:
                 continue
-    except BaseException:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-        raise
-    stdout_thread.join(timeout=5)
-    stderr_thread.join(timeout=5)
-    stdin_thread.join(timeout=5)
-    for stream in (process.stdin, process.stdout, process.stderr):
-        if stream is not None and not stream.closed:
-            stream.close()
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        # Do this even if the direct child has already exited: it might have
+        # abandoned descendants in its start_new_session process group.
+        if process is not None:
+            try:
+                _terminate_process_group(process)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        for thread in (stdout_thread, stderr_thread, stdin_thread):
+            if thread is not None:
+                try:
+                    thread.join(timeout=5)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        if process is not None:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+        for thread in (stdout_thread, stderr_thread, stdin_thread):
+            if thread is not None and thread.is_alive():
+                try:
+                    thread.join(timeout=0.5)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+                if thread.is_alive():
+                    cleanup_errors.append(RunnerError("runner I/O thread did not terminate"))
+    if cleanup_errors:
+        cleanup_error = next(
+            (error for error in cleanup_errors if isinstance(error, RunnerCleanupError)),
+            cleanup_errors[0],
+        )
+        if isinstance(cleanup_error, RunnerCleanupError):
+            if primary_error is not None:
+                raise cleanup_error from primary_error
+            raise cleanup_error
+        failure = RunnerError("runner local I/O cleanup failed")
+        if primary_error is not None:
+            raise failure from primary_error
+        raise failure from cleanup_error
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    assert process is not None
     stdout = stdout_buffer.decode("utf-8", errors="replace")
     stderr = stderr_buffer.decode("utf-8", errors="replace")
     if callback_error is not None:
@@ -444,6 +597,21 @@ class AgentRunner:
     sandbox: SandboxConfig
     agent: AgentConfig
     allow_synthetic_usage: bool = False
+
+    def assert_production_isolation(self) -> str:
+        """Fail closed because this runner is limited to host/OCI rehearsals.
+
+        A production runner must override this assertion and return a stable
+        profile identifier only after proving that the model and every
+        repository operation execute inside the strict per-run VM boundary.
+        Ordinary Docker/Podman containers share the host kernel, while the
+        host backend has no OS isolation, so neither is admitted here.
+        """
+
+        raise RunnerError(
+            "strict VM isolation is not wired: the host and Docker/Podman "
+            "AgentRunner backends are rehearsal-only"
+        )
 
     def runtime_available(self) -> bool:
         return shutil.which(self.sandbox.runtime) is not None
@@ -559,6 +727,10 @@ class AgentRunner:
             )
         except BaseException as exc:
             if not self._remove_container(run_id, stage):
+                if isinstance(exc, RunnerCleanupError):
+                    # Preserve the owned process-group identity for the outer
+                    # supervisor; it can persist actionable fail-closed evidence.
+                    raise
                 raise RunnerError(
                     f"container cleanup could not be proven for {stage} after failure"
                 ) from exc

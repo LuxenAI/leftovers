@@ -5,8 +5,22 @@ SANDBOX_IMAGE ?= leftovers-sandbox:latest
 REHEARSAL_IMAGE ?= leftovers-rehearsal:local
 REHEARSAL_REPORT ?= .leftovers/rehearsal-report.json
 
-.PHONY: dashboard demo package-smoke rehearsal-image sandbox-image test test-local training-run \
-	training-run-process validate
+.PHONY: dashboard demo guest-lock-check guest-release-preflight macos-package package-smoke \
+	rehearsal-image sandbox-image strict-vm-check test test-local training-run training-run-process validate
+
+macos-package:
+	python3 scripts/build_macos_package.py
+
+strict-vm-check:
+	sh vm/check.sh
+
+guest-lock-check:
+	sh vm/guest/check-static.sh
+
+# Intentionally fails until a reviewed builder image, public-key trust root,
+# signer identities, reproducibility epoch, and provenance verifier are pinned.
+guest-release-preflight:
+	python3 vm/guest/release.py release-readiness
 
 test:
 	$(RUNTIME) build --tag $(TEST_IMAGE) .

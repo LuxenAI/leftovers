@@ -103,13 +103,13 @@ approval, model check-in, synthetic usage, and proven cleanup.
 
 Process-mode rehearsal is supplemental. For sandboxed local QA it must be wrapped in an
 operating-system sandbox; `--profile none` is an explicitly unwrapped diagnostic used only to
-exercise contract and lifecycle behavior. Container mode is the production-faithful proof: it uses
-the real runner, read-only root filesystem, no network, dropped capabilities, read-only
+exercise contract and lifecycle behavior. Container mode is the stronger deterministic rehearsal:
+it uses the real runner, read-only root filesystem, no network, dropped capabilities, read-only
 planning/review mounts, read-only `.git` during implementation, resource limits, ownership labels,
-and label-scoped cleanup. Synthetic
-rehearsal usage never appears in production totals.
+and label-scoped cleanup. It still shares the host kernel and is not production-isolation evidence.
+Synthetic rehearsal usage never appears in production totals.
 
-Build and execute the OCI proof with:
+Build and execute the OCI rehearsal with:
 
 ```sh
 make rehearsal-image

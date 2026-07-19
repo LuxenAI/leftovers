@@ -1,0 +1,6 @@
+config BR2_PACKAGE_LEFTOVERS_GUEST_SUPERVISOR
+	bool "leftovers guest supervisor"
+	depends on BR2_aarch64
+	help
+	  Minimal PID 1 supervisor for the Leftovers strict-VM guest.  It is
+	  intentionally fail-closed and does not provide a general command runner.

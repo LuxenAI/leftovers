@@ -21,6 +21,7 @@ from leftovers.rehearsal import (
     RehearsalError,
     RehearsalRunner,
     RehearsalWorkspaceLease,
+    _controller_command,
     build_rehearsal_config,
     run_rehearsal,
     seatbelt_argv,
@@ -32,6 +33,15 @@ _CONTAINER_MODE = os.environ.get("LEFTOVERS_RUN_CONTAINER_REHEARSAL", "")
 
 
 class RehearsalTests(unittest.TestCase):
+    def test_source_controller_command_does_not_depend_on_ambient_pythonpath(self) -> None:
+        with patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+            command = _controller_command()
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(
+            Path(command[1]).resolve(), Path(__file__).parents[1] / "src" / "__main__.py"
+        )
+        self.assertTrue(Path(command[1]).is_file())
+
     def test_controller_owned_fixture_has_no_remote_and_reproduces_bug(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

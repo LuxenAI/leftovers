@@ -1,3 +1,5 @@
+# This example is valid for scouting and deterministic OCI rehearsal. The stock
+# Docker/Podman runner is deliberately rejected for unattended production work.
 version = 1
 state_dir = ".leftovers/state"
 temp_root = ".leftovers/workspaces"
@@ -58,7 +60,8 @@ forbid_dependency_changes = true
 
 [sandbox]
 runtime = "docker"
-# Replace this development tag with a trusted image digest before autonomous use.
+# Replace this development tag with a trusted image digest before OCI rehearsal. Digest pinning does
+# not make the stock shared-kernel runner eligible for production.
 image = "leftovers-sandbox:latest"
 network = "none"
 memory = "4g"
@@ -85,6 +88,38 @@ estimated_tokens_p50 = 40000
 estimated_tokens_p95 = 80000
 max_repair_cycles = 1
 pass_environment = []
+
+[strict_vm]
+# This is a typed staging contract, not an execution switch. Production remains hard-disabled until
+# a reviewed v2 launcher, immutable guest, result extractor, and inference-only mediator pass live
+# adversarial tests together. Enabling it requires absolute artifact paths and lowercase SHA-256s.
+# `guest_policy_path` is a canonical immutable `guest-policy.json` generated beside the signed boot
+# artifacts. Its digest is derived by the controller after verifying that its boot digests match;
+# no policy digest may be supplied in TOML.
+enabled = false
+profile = "darwin-vz-offline-v2"
+cpu_count = 2
+memory_bytes = 2147483648
+scratch_bytes = 2147483648
+wall_time_seconds = 1800
+max_rounds = 8
+max_actions_per_round = 24
+max_request_bytes = 268435456
+result_region_bytes = 16777216
+max_observation_bytes = 262144
+
+[mediator]
+# No reviewed production implementation exists. `fixture` is accepted only with the strict-vm
+# backend for offline lifecycle tests and can never bypass the controller-owned capability gate.
+backend = "disabled"
+provider = "openai-subscription"
+model = "gpt-5.6-terra"
+reasoning_effort = "high"
+max_calls = 12
+per_call_timeout_seconds = 360
+max_prompt_bytes = 262144
+max_response_bytes = 65536
+total_token_cap = 65000
 
 [publication]
 mode = "dry-run"
