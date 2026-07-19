@@ -1,23 +1,87 @@
 # Operations
 
+## Portable macOS preview bundle
+
+For a one-shot, no-publish preview on macOS, use the repository-local installer:
+
+```sh
+./scripts/install-macos.sh --force-config --scout
+```
+
+It runs from a non-root account and requires Python 3.11+, Git, `sandbox-exec`, a saved login in a
+Codex CLI `0.144.5+`, and an authenticated `gh` CLI for read-only repository scouting. The foreground
+job completes without the Codex desktop app/chat. The current installer still verifies the
+configured CLI identity for package compatibility, but any launchd job receives no
+`CODEX_HOME` or Codex binary path and does not invoke the model.
+
+The installer creates only owner-private files under `.leftovers/install`. It validates a dry-run
+configuration, performs a synthetic Seatbelt rehearsal, then runs the job. The job writes:
+
+- `.leftovers/install/reports/repository-candidates.json` — read-only nominations only;
+- `.leftovers/install/reports/seatbelt-rehearsal.json` — installer synthetic workflow evidence;
+- `.leftovers/install/reports/job-summary.json` — start/stop reason and any failure-closed error;
+- `.leftovers/install/cleanup-pending.json` — present only while execute cleanup is active or
+  unproven; and
+- `.leftovers/install/logs/job.stdout.log` and `job.stderr.log` — one-shot launch diagnostics when
+  launchd is used from a non-protected checkout.
+
+The full job has one 45-minute lifecycle
+envelope across GitHub-token lookup and scouting. Host and OCI contribution execution are denied at
+build time in the job and again by the production orchestrator before budget or discovery. Legacy
+cleanup-lease verification remains tested for safe reconciliation, but the scout-only path acquires
+no worker resource. The job reuses the successful installer rehearsal rather than repeating it.
+Inspect it with `./scripts/status-macos.sh`. `--launch-now` is accepted only when the checkout is
+outside macOS-protected Desktop, Documents, and Downloads folders; never grant Full Disk Access to
+bypass that fail-closed check. After saving required evidence, run `./scripts/uninstall-macos.sh`;
+that helper bootouts only a manifest-recorded label and removes only the exact repository-local
+install root.
+
+Repository discovery does not add an allowlist entry, enable AI contributions, start an execution,
+or publish. The bundled configuration has a placeholder repository, but even a curated repository
+cannot bypass the strict source-disabled execution gate. Docker/Podman availability does not change
+that status. Successful read-only scouting and a supplemental Seatbelt rehearsal are the only
+expected outcomes. See
+[`MACOS_PACKAGE.md`](MACOS_PACKAGE.md) and [`../vm/README.md`](../vm/README.md).
+
+## Docker Sandboxes candidate rehearsal
+
+The independent, one-shot sbx command is:
+
+```sh
+./scripts/sbx-rehearsal.sh --execute
+```
+
+It is independent of the Codex desktop app and this task, and it is not a contribution cycle. After
+the read-only checks it creates/removes one randomly controller-named clone-mode `shell` sandbox to
+run fixed port, environment, clone-write, and cleanup canaries. It does not start an agent, call a
+provider, or invoke Terra/high. The name-based lifecycle is not sandbox-ownership attestation. The
+command remains useful only as no-agent rehearsal evidence; it does not spend the quota envelope or
+alter the source-disabled `leftovers run --execute` gate. Follow
+[`DOCKER_SANDBOXES.md`](DOCKER_SANDBOXES.md) for the required exact global OpenAI service secret,
+Locked Down policy allow rule, finite-canary limitation, and installed Keychain `-50` blocker.
+
 ## First activation
 
 1. Create `config/leftovers.toml` from the example.
 2. Curate a small repository allowlist and record current licenses, contribution rules, AI policy,
    default branch, forbidden paths, and exact offline checks. If AI contributions are allowed, record
    the policy's HTTPS source and the date it was actually checked.
-3. Build a provider-specific agent image from `sandbox/Dockerfile` without GitHub credentials.
-4. Run `validate`, `doctor`, fixture scout, the OCI training cycle, live scout, and at least three
-   execute-only dry runs.
-5. Inspect audit journals and confirm every temporary workspace is gone.
-6. Enable `draft-pr`, set the standing acknowledgement, and use a dedicated public-only contributor
-   identity. Record the exact `publication.expected_login` and immutable numeric
+3. Optionally prepare the active sbx candidate and run its standalone shell rehearsal. It must retain
+   `production_execution_authorized: false` even on success.
+4. Build a provider-specific rehearsal image from `sandbox/Dockerfile` without credentials.
+5. Run `validate`, `doctor`, fixture scout, the OCI training cycle, and live scout. `doctor` must
+   continue to report `sbx_execution: false` until the strict evidence contract is complete.
+6. Inspect audit journals and confirm every temporary workspace is gone.
+7. Only after a separately reviewed strict runner has an integrated, credential-isolating model
+   mediator, bounded result extractor, and live escape/resource/cleanup evidence, enable `draft-pr`,
+   set the standing acknowledgement, and use a dedicated public-only contributor identity. Record the exact
+   `publication.expected_login` and immutable numeric
    `publication.expected_user_id`; a mismatch must stop publication. Keep per-window and
    per-repository output caps small.
 
 ## Deterministic training cycle
 
-Build and run the production-faithful Docker rehearsal before connecting a provider adapter:
+Build and run the deterministic shared-kernel Docker rehearsal before connecting a provider adapter:
 
 ```sh
 make rehearsal-image
@@ -68,10 +132,16 @@ into production accounting.
 ## Daily and weekly schedules
 
 `scripts/run-cycle.sh` is the single scheduler entrypoint. It holds a nonblocking kernel advisory
-lock for the complete process lifetime and defaults to execute-only dry runs. Each invocation selects
-and attempts at most one issue. The budget ledger prevents later invocations from reusing the same
-configured window, while publication caps and repository cooldowns independently bound draft PR
-output.
+lock for the complete process lifetime and requests execute-only dry runs. In the current release,
+those invocations are negative admission tests rather than contribution attempts. Once a strict
+runner is integrated, each admitted invocation may select and attempt at most one issue. The budget
+ledger prevents later invocations from reusing the same configured window, while publication caps
+and repository cooldowns independently bound draft PR output.
+
+In the current release, a production scheduler reaches the strict-isolation preflight and returns
+`policy_denied` before budget/discovery. Do not install the daily/weekly execute schedules expecting
+contribution work until a strict execution backend is independently reviewed, integrated, and
+live-attested. The separate macOS preview installer remains the supported read-only scouting path.
 
 The wrapper reads `.leftovers/scheduler.env` when present, or the exact path in
 `LEFTOVERS_ENV_FILE`. It accepts literal `KEY=value` lines only: no quote processing, variable
@@ -178,8 +248,9 @@ not enabled by this repository.
 
 - `deferred`: wait for the next window; do not bypass the reserve.
 - `no_candidate`: normal; do not lower policy just to consume quota.
-- `runtime_unavailable`: install/configure a container runtime separately; Leftovers never installs
-  host packages.
+- `runtime_unavailable`: for an OCI rehearsal, install/configure a container runtime separately;
+  Leftovers never installs host packages. Runtime availability alone does not satisfy the strict
+  production evidence contract.
 - `test_failed` or `review_rejected`: retain audit evidence, not the workspace; reconsider next run.
 - `upstream_moved`: rediscover and reverify from the new base.
 - `publish_partial`: stop automatic writes. Inspect the contributor fork for
@@ -187,7 +258,9 @@ not enabled by this repository.
   inspect `publications.sqlite3`. v0.1 has no automatic resume/release path; do not simply rerun.
 - `cleanup_pending`: stop new jobs. Run `leftovers cleanup` only with the configured runtime
   available; it verifies and removes expired, exactly labeled containers before examining marked
-  workspaces. Never use global prune or delete a possibly mounted workspace first.
+  workspaces. For the portable bundle, also inspect `.leftovers/install/cleanup-pending.json` and its
+  exact run ID/container label. Never use global prune or delete a possibly mounted workspace first;
+  delete the marker only after reconciliation proves both container and workspace cleanup.
 
 When cleanup and an earlier failure both occur, `stage` is `cleanup_pending` while the primary
 `failure_code` (especially `publish_partial`) is preserved and the message reports both conditions.

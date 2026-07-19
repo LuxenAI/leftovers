@@ -1,0 +1,5 @@
+menu "Leftovers strict VM guest"
+
+source "$BR2_EXTERNAL_LEFTOVERS_GUEST_PATH/package/leftovers-guest-supervisor/Config.in"
+
+endmenu

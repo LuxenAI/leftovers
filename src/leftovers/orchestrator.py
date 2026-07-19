@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -14,7 +15,7 @@ from typing import Any
 
 from .audit import AuditJournal
 from .budget import BudgetError, BudgetGate, BudgetLedger, budget_window_key
-from .config import AppConfig, RepositoryConfig
+from .config import AppConfig, RepositoryConfig, production_isolation_violations
 from .github import GitHubClient, GitHubError, IssueSource
 from .models import (
     FailureCode,
@@ -34,11 +35,82 @@ from .policy import (
 )
 from .prompts import render_prompt
 from .publisher import GhPublisher, PublicationError, create_approval_bundle
-from .runner import AgentOutputError, AgentRunner, RunnerError
+from .runner import AgentOutputError, AgentRunner, RunnerCleanupError, RunnerError
+from .sbx import DOCKER_SANDBOX_EXECUTION_ENABLED
 from .scoring import score_issue
 from .state import PublicationLedger, StatePolicyError
 from .telemetry import TERMINAL_RUN_STAGES, TelemetryWriter
 from .workspace import WorkspaceError, WorkspaceLease
+
+# ``run_kind`` is observability metadata, not an authority selector.  The only
+# exception is the deterministic rehearsal, whose three local components carry
+# an identity-only marker issued below.  Keep the marker private and compare it
+# by identity so a generic runner/source/lease cannot accidentally opt into the
+# relaxed rehearsal path by copying a string attribute.
+_TRAINING_REHEARSAL_PROVIDER = "leftovers-rehearsal"
+_TRAINING_REHEARSAL_MODEL = "deterministic-parser-fixture-v1"
+_TRAINING_REHEARSAL_ROLES = frozenset({"runner", "source", "lease_factory"})
+_TRAINING_REHEARSAL_MARKERS = {role: object() for role in _TRAINING_REHEARSAL_ROLES}
+_TRAINING_REHEARSAL_ATTRIBUTE = "_leftovers_training_rehearsal_marker"
+
+
+def _attest_training_rehearsal_component(component_type: type[Any], role: str) -> type[Any]:
+    """Mark one controller-owned deterministic rehearsal component.
+
+    This is intentionally private.  It is used only by ``leftovers.rehearsal``
+    and by dedicated in-tree test doubles.  It is not a production capability:
+    production execution continues to require the source-disabled strict
+    whole-cycle evidence gate.
+    """
+
+    if role not in _TRAINING_REHEARSAL_ROLES or not isinstance(component_type, type):
+        raise ValueError("training rehearsal component role is invalid")
+    module = component_type.__module__
+    if module == "leftovers.rehearsal":
+        pass
+    else:
+        # ``unittest discover -s tests`` imports this file as the top-level
+        # ``test_orchestrator`` module, while explicit module execution may
+        # name it ``tests.test_orchestrator``.  Do not trust that caller-set
+        # string alone: bind the allowance to the exact in-tree test file.
+        loaded_module = sys.modules.get(module)
+        module_file = getattr(loaded_module, "__file__", None)
+        expected_test_file = Path(__file__).resolve().parents[2] / "tests/test_orchestrator.py"
+        try:
+            is_dedicated_test = (
+                module in {"test_orchestrator", "tests.test_orchestrator"}
+                and module_file is not None
+                and Path(module_file).resolve(strict=True)
+                == expected_test_file.resolve(strict=True)
+            )
+        except OSError:
+            is_dedicated_test = False
+        if is_dedicated_test:
+            pass
+        else:
+            raise ValueError(
+                "only controller rehearsal or dedicated test components may be attested"
+            )
+    setattr(component_type, _TRAINING_REHEARSAL_ATTRIBUTE, _TRAINING_REHEARSAL_MARKERS[role])
+    return component_type
+
+
+def _training_rehearsal_component(role: str) -> Callable[[type[Any]], type[Any]]:
+    """Return the narrowly scoped decorator used by rehearsal/test fixtures."""
+
+    return lambda component_type: _attest_training_rehearsal_component(component_type, role)
+
+
+def _is_attested_training_rehearsal_component(component: object, role: str) -> bool:
+    """Require an exact class/factory marker; inherited markers do not count."""
+
+    if role not in _TRAINING_REHEARSAL_ROLES:
+        return False
+    component_type = component if isinstance(component, type) else type(component)
+    return (
+        component_type.__dict__.get(_TRAINING_REHEARSAL_ATTRIBUTE)
+        is _TRAINING_REHEARSAL_MARKERS[role]
+    )
 
 
 class RunAbort(RuntimeError):
@@ -507,6 +579,55 @@ class ContributionOrchestrator:
     def scout(self) -> list[RankedCandidate]:
         return rank_candidates(self.config, self.source)
 
+    def _training_rehearsal_violations(self) -> tuple[str, ...]:
+        """Return the exact reasons a caller cannot use training as an escape hatch.
+
+        Training is reserved for the built-in deterministic rehearsal.  Unlike
+        production, it may use a supplemental process/container fixture, but
+        it must never accept a real issue source, generic workspace lease,
+        provider identity, ambient environment, network, or publication mode.
+        Check this before budget accounting or discovery so no untrusted source
+        or runner method is reached on a failed admission.
+        """
+
+        violations: list[str] = []
+        if not _is_attested_training_rehearsal_component(self.runner, "runner"):
+            violations.append("training requires an attested deterministic rehearsal runner")
+        if not _is_attested_training_rehearsal_component(self.source, "source"):
+            violations.append("training requires an attested deterministic rehearsal issue source")
+        if not _is_attested_training_rehearsal_component(self.lease_factory, "lease_factory"):
+            violations.append("training requires an attested deterministic rehearsal lease factory")
+        if getattr(self.runner, "allow_synthetic_usage", False) is not True:
+            violations.append("training requires a synthetic-accounting rehearsal runner")
+        if (
+            self.config.agent.provider != _TRAINING_REHEARSAL_PROVIDER
+            or self.config.agent.model != _TRAINING_REHEARSAL_MODEL
+            or self.config.agent.max_repair_cycles != 0
+            or not self.config.agent.checkin_required
+            or not self.config.agent.usage_reporting_required
+        ):
+            violations.append("training requires the bounded deterministic rehearsal identity")
+        if self.config.sandbox.network != "none":
+            violations.append("training sandbox.network must be none")
+        networked_repositories = sorted(
+            repository.slug
+            for repository in self.config.repositories
+            if repository.enabled and repository.network not in {None, "none"}
+        )
+        if networked_repositories:
+            violations.append(
+                "training repository network overrides must be none: "
+                + ", ".join(networked_repositories)
+            )
+        if self.config.agent.pass_environment:
+            violations.append("training agent.pass_environment must be empty")
+        if (
+            self.config.publication.mode != "dry-run"
+            or self.config.publication.external_writes_acknowledged
+        ):
+            violations.append("training publication must be dry-run with external writes disabled")
+        return tuple(violations)
+
     def _run_agent(
         self,
         telemetry: _RunTelemetry,
@@ -552,8 +673,12 @@ class ContributionOrchestrator:
         execute_work: bool,
         publish: bool,
         remaining_tokens: int | None = None,
+        run_id: str | None = None,
     ) -> RunOutcome:
-        run_id = uuid.uuid4().hex
+        if run_id is None:
+            run_id = uuid.uuid4().hex
+        elif re.fullmatch(r"[a-f0-9]{32}", run_id) is None:
+            raise ValueError("run_id must be exactly 32 lowercase hexadecimal characters")
         outcome = RunOutcome(run_id=run_id, stage=RunStage.SCHEDULED)
         journal = AuditJournal(self.config.state_dir, run_id)
         telemetry = _RunTelemetry(self.config, run_id, self.run_kind, journal)
@@ -574,6 +699,8 @@ class ContributionOrchestrator:
                 publish=publish,
                 remaining_tokens=remaining_tokens,
             )
+        except RunnerCleanupError:
+            raise
         except (
             RunnerError,
             WorkspaceError,
@@ -617,13 +744,40 @@ class ContributionOrchestrator:
         publish: bool,
         remaining_tokens: int | None,
     ) -> RunOutcome:
+        def finish_without_resources() -> RunOutcome:
+            """Record a vacuous, trusted receipt before any workspace/container exists."""
+
+            journal.append(
+                "cleanup_receipt",
+                containers_removed=True,
+                local_workspace_removed=True,
+                resources_acquired=False,
+            )
+            return outcome
+
+        if self.run_kind == "training":
+            if publish:
+                outcome.stage = RunStage.ABORTED
+                outcome.failure_code = FailureCode.POLICY_DENIED
+                outcome.message = "training rehearsals can never publish"
+                journal.append("training_preflight_denied", reason=outcome.message)
+                return finish_without_resources()
+            training_violations = self._training_rehearsal_violations()
+            if training_violations:
+                outcome.stage = RunStage.ABORTED
+                outcome.failure_code = FailureCode.POLICY_DENIED
+                outcome.message = "training rehearsal admission denied: " + "; ".join(
+                    training_violations
+                )
+                journal.append("training_preflight_denied", reason=outcome.message)
+                return finish_without_resources()
         if publish:
             if not execute_work:
                 outcome.stage = RunStage.ABORTED
                 outcome.failure_code = FailureCode.POLICY_DENIED
                 outcome.message = "publication requires execution"
                 journal.append("aborted", reason=outcome.message)
-                return outcome
+                return finish_without_resources()
             try:
                 self.publisher.assert_authorized(True)
             except PublicationError as exc:
@@ -631,13 +785,32 @@ class ContributionOrchestrator:
                 outcome.failure_code = FailureCode.POLICY_DENIED
                 outcome.message = str(exc)
                 journal.append("aborted", reason=outcome.message)
-                return outcome
+                return finish_without_resources()
         if execute_work and getattr(os, "geteuid", lambda: 1)() == 0:
             outcome.stage = RunStage.ABORTED
             outcome.failure_code = FailureCode.POLICY_DENIED
             outcome.message = "controller execution as root is forbidden"
             journal.append("aborted", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
+        if execute_work and self.run_kind == "production":
+            isolation_violations = production_isolation_violations(self.config)
+            if isolation_violations:
+                outcome.stage = RunStage.ABORTED
+                outcome.failure_code = FailureCode.POLICY_DENIED
+                outcome.message = "unattended production isolation denied: " + "; ".join(
+                    isolation_violations
+                )
+                journal.append("isolation_preflight_denied", reason=outcome.message)
+                return finish_without_resources()
+            if not DOCKER_SANDBOX_EXECUTION_ENABLED:
+                outcome.stage = RunStage.ABORTED
+                outcome.failure_code = FailureCode.POLICY_DENIED
+                outcome.message = (
+                    "unattended production isolation denied: Docker Sandboxes execution "
+                    "capability is source-disabled pending live boundary evidence"
+                )
+                journal.append("isolation_preflight_denied", reason=outcome.message)
+                return finish_without_resources()
         try:
             snapshot = BudgetGate(self.config.budget).snapshot(remaining_tokens)
         except BudgetError as exc:
@@ -645,7 +818,7 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.BUDGET_EXHAUSTED
             outcome.message = str(exc)
             journal.append("deferred", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         outcome.stage = RunStage.BUDGET_CHECK
         telemetry.transition(outcome.stage)
         journal.append("budget", snapshot=snapshot)
@@ -658,7 +831,7 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.AGENT_FAILED
             outcome.message = f"budget ledger unavailable: {exc}"
             journal.append("failed", failure_code=outcome.failure_code, reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         telemetry.record_budget(
             snapshot,
             window_key=window_key,
@@ -673,7 +846,7 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.BUDGET_EXHAUSTED
             outcome.message = reason
             journal.append("deferred", reason=reason)
-            return outcome
+            return finish_without_resources()
 
         outcome.stage = RunStage.DISCOVERING
         telemetry.transition(outcome.stage)
@@ -687,7 +860,7 @@ class ContributionOrchestrator:
             )
             outcome.message = str(exc)
             journal.append("github_read_failed", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         journal.append("candidates", candidates=[ranked_to_dict(item) for item in ranked])
         publication_ledger: PublicationLedger | None = None
         eligible_candidates = [item for item in ranked if item.eligible]
@@ -731,7 +904,7 @@ class ContributionOrchestrator:
                 else "no candidate passed deterministic policy gates"
             )
             journal.append("skipped", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         outcome.issue_ref = selected.issue.ref
         outcome.score = selected.score.total
         outcome.stage = RunStage.SELECTED
@@ -742,7 +915,7 @@ class ContributionOrchestrator:
             outcome.message = (
                 "candidate selected; rerun with --execute to create a disposable workspace"
             )
-            return outcome
+            return finish_without_resources()
 
         repository = next(
             repo for repo in self.config.repositories if repo.slug == selected.issue.repo.slug
@@ -752,14 +925,14 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.POLICY_DENIED
             outcome.message = "repository has no operator-curated verification command"
             journal.append("aborted", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
 
         if not self.runner.runtime_available():
             outcome.stage = RunStage.FAILED
             outcome.failure_code = FailureCode.RUNTIME_UNAVAILABLE
             outcome.message = f"{self.config.sandbox.runtime} is not installed or not on PATH"
             journal.append("failed", failure_code=outcome.failure_code, reason=outcome.message)
-            return outcome
+            return finish_without_resources()
 
         try:
             reservation = ledger.reserve(run_id, snapshot, self.config.agent.estimated_tokens_p95)
@@ -768,7 +941,7 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.BUDGET_EXHAUSTED
             outcome.message = str(exc)
             journal.append("deferred", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         journal.append("budget_reserved", reservation=reservation)
         telemetry.record_budget(
             snapshot,
@@ -781,7 +954,7 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.BUDGET_EXHAUSTED
             outcome.message = "quota reset time is unknown"
             journal.append("deferred", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         seconds_until_reset = (snapshot.resets_at - utc_now()).total_seconds()
         run_seconds = min(
             self.config.budget.max_run_seconds,
@@ -792,7 +965,7 @@ class ContributionOrchestrator:
             outcome.failure_code = FailureCode.BUDGET_EXHAUSTED
             outcome.message = "quota-window deadline expired before execution"
             journal.append("deferred", reason=outcome.message)
-            return outcome
+            return finish_without_resources()
         run_deadline = time.monotonic() + run_seconds
 
         lease = self.lease_factory(self.config.temp_root, run_id)
@@ -1212,6 +1385,8 @@ class ContributionOrchestrator:
             outcome.failure_code = exc.code
             outcome.message = str(exc)
             journal.append("aborted", failure_code=exc.code, reason=str(exc))
+        except RunnerCleanupError:
+            raise
         except (
             RunnerError,
             WorkspaceError,
@@ -1286,6 +1461,7 @@ class ContributionOrchestrator:
                             "cleanup_receipt",
                             containers_removed=True,
                             local_workspace_removed=True,
+                            resources_acquired=True,
                         )
                     else:
                         journal.append("cleanup_failed", reason=outcome.message)

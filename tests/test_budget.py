@@ -27,7 +27,11 @@ class BudgetGateTests(unittest.TestCase):
             minimum_spendable_tokens=30_000,
             safety_multiplier=1.25,
         )
-        snapshot = BudgetGate(config).snapshot()
+        with patch(
+            "leftovers.budget.utc_now",
+            return_value=datetime(2026, 7, 17, 12, tzinfo=UTC),
+        ):
+            snapshot = BudgetGate(config).snapshot()
         self.assertEqual(snapshot.spendable_tokens, 130_000)
         self.assertTrue(BudgetGate(config).can_start(snapshot, 80_000)[0])
         self.assertFalse(BudgetGate(config).can_start(snapshot, 120_000)[0])

@@ -48,6 +48,10 @@ for the bounded Git push subprocess and removes the temporary askpass helper aft
 
 ## Publication policy
 
+The publisher implementation exists for a future admitted strict runner. The current production
+isolation gate rejects host and stock OCI execution before budget or discovery, so publication flags
+and credentials cannot make those paths reach this write plane.
+
 Before work and again before publication, check that the repository is active, permits forks and PRs,
 accepts the contributor type, and has not capped outside contributors. GitHub introduced repository
 PR access controls in February 2026 and an outside-user open-PR cap in June 2026; draft PRs do not

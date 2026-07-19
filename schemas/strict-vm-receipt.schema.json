@@ -1,0 +1,357 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.invalid/schemas/strict-vm-receipt.schema.json",
+  "title": "Leftovers strict VM launcher receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "launcher_version",
+    "manifest_sha256",
+    "run_id",
+    "mode",
+    "status",
+    "started_at",
+    "finished_at",
+    "config_validated",
+    "stop_reason",
+    "limits",
+    "artifacts",
+    "devices",
+    "scratch_retained",
+    "error_code"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "launcher_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "manifest_sha256": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/digest" }
+      ]
+    },
+    "run_id": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/runId" }
+      ]
+    },
+    "mode": { "enum": ["check", "run", "unknown"] },
+    "status": {
+      "enum": ["validated", "guest_stopped", "timed_out", "interrupted", "failed"]
+    },
+    "started_at": { "$ref": "#/$defs/nullableString" },
+    "finished_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "config_validated": { "type": "boolean" },
+    "stop_reason": { "$ref": "#/$defs/nullableString" },
+    "limits": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/limits" }
+      ]
+    },
+    "artifacts": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/artifacts" }
+      ]
+    },
+    "devices": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/devices" }
+      ]
+    },
+    "scratch_retained": { "type": "boolean" },
+    "error_code": { "$ref": "#/$defs/nullableString" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "validated" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "mode": { "const": "check" },
+          "manifest_sha256": { "$ref": "#/$defs/digest" },
+          "run_id": { "$ref": "#/$defs/runId" },
+          "started_at": { "type": "null" },
+          "config_validated": { "const": true },
+          "stop_reason": { "type": "null" },
+          "limits": { "$ref": "#/$defs/limits" },
+          "artifacts": { "$ref": "#/$defs/artifacts" },
+          "devices": { "$ref": "#/$defs/devices" },
+          "scratch_retained": { "const": false },
+          "error_code": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "guest_stopped" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "mode": { "const": "run" },
+          "manifest_sha256": { "$ref": "#/$defs/digest" },
+          "run_id": { "$ref": "#/$defs/runId" },
+          "started_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "config_validated": { "const": true },
+          "stop_reason": { "const": "guest_shutdown" },
+          "limits": { "$ref": "#/$defs/limits" },
+          "artifacts": { "$ref": "#/$defs/artifacts" },
+          "devices": { "$ref": "#/$defs/devices" },
+          "scratch_retained": { "const": true },
+          "error_code": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "timed_out" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "mode": { "const": "run" },
+          "manifest_sha256": { "$ref": "#/$defs/digest" },
+          "run_id": { "$ref": "#/$defs/runId" },
+          "started_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "config_validated": { "const": true },
+          "stop_reason": { "const": "wall_timeout" },
+          "limits": { "$ref": "#/$defs/limits" },
+          "artifacts": { "$ref": "#/$defs/artifacts" },
+          "devices": { "$ref": "#/$defs/devices" },
+          "scratch_retained": { "const": true },
+          "error_code": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "interrupted" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "mode": { "const": "run" },
+          "manifest_sha256": { "$ref": "#/$defs/digest" },
+          "run_id": { "$ref": "#/$defs/runId" },
+          "started_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "config_validated": { "const": true },
+          "stop_reason": { "type": "string", "pattern": "^signal_(1|2|15)$" },
+          "limits": { "$ref": "#/$defs/limits" },
+          "artifacts": { "$ref": "#/$defs/artifacts" },
+          "devices": { "$ref": "#/$defs/devices" },
+          "scratch_retained": { "const": true },
+          "error_code": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "unknown" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "status": { "const": "failed" },
+          "manifest_sha256": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "devices": {
+            "allOf": [
+              { "$ref": "#/$defs/devices" },
+              { "properties": { "storage_devices": { "minItems": 2, "maxItems": 2 } } }
+            ]
+          }
+        },
+        "required": ["devices"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "properties": { "request_disk_sha256": { "type": "null" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "devices": {
+            "allOf": [
+              { "$ref": "#/$defs/devices" },
+              { "properties": { "storage_devices": { "minItems": 3, "maxItems": 3 } } }
+            ]
+          }
+        },
+        "required": ["devices"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "properties": { "request_disk_sha256": { "$ref": "#/$defs/digest" } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "runId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "nullableString": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 256 }
+      ]
+    },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_count", "memory_bytes", "wall_time_seconds", "scratch_bytes"],
+      "properties": {
+        "cpu_count": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 536870912,
+          "maximum": 4294967296,
+          "multipleOf": 1048576
+        },
+        "wall_time_seconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+        "scratch_bytes": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 4294967296,
+          "multipleOf": 1048576
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kernel_sha256",
+        "initrd_sha256",
+        "root_disk_sha256",
+        "request_disk_sha256"
+      ],
+      "properties": {
+        "kernel_sha256": { "$ref": "#/$defs/digest" },
+        "initrd_sha256": { "$ref": "#/$defs/digest" },
+        "root_disk_sha256": { "$ref": "#/$defs/digest" },
+        "request_disk_sha256": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/digest" }
+          ]
+        }
+      }
+    },
+    "rootStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "kind", "read_only", "size_bytes"],
+      "properties": {
+        "role": { "const": "root" },
+        "kind": { "const": "virtio-block" },
+        "read_only": { "const": true },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 17179869184,
+          "multipleOf": 512
+        }
+      }
+    },
+    "scratchStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "kind", "read_only", "size_bytes"],
+      "properties": {
+        "role": { "const": "scratch" },
+        "kind": { "const": "virtio-block" },
+        "read_only": { "const": false },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 4294967296,
+          "multipleOf": 1048576
+        }
+      }
+    },
+    "requestStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "kind", "read_only", "size_bytes"],
+      "properties": {
+        "role": { "const": "request" },
+        "kind": { "const": "virtio-block" },
+        "read_only": { "const": true },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 268435456,
+          "multipleOf": 512
+        }
+      }
+    },
+    "storageDevices": {
+      "oneOf": [
+        {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/rootStorage" },
+            { "$ref": "#/$defs/scratchStorage" }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/rootStorage" },
+            { "$ref": "#/$defs/scratchStorage" },
+            { "$ref": "#/$defs/requestStorage" }
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
+        }
+      ]
+    },
+    "devices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "boot_loader",
+        "network_devices",
+        "socket_devices",
+        "directory_shares",
+        "serial_ports",
+        "console_devices",
+        "graphics_devices",
+        "audio_devices",
+        "usb_controllers",
+        "keyboards",
+        "pointing_devices",
+        "entropy_devices",
+        "memory_balloon_devices",
+        "storage_devices"
+      ],
+      "properties": {
+        "platform": { "const": "generic" },
+        "boot_loader": { "const": "linux" },
+        "network_devices": { "const": 0 },
+        "socket_devices": { "const": 0 },
+        "directory_shares": { "const": 0 },
+        "serial_ports": { "const": 0 },
+        "console_devices": { "const": 0 },
+        "graphics_devices": { "const": 0 },
+        "audio_devices": { "const": 0 },
+        "usb_controllers": { "const": 0 },
+        "keyboards": { "const": 0 },
+        "pointing_devices": { "const": 0 },
+        "entropy_devices": { "const": 0 },
+        "memory_balloon_devices": { "const": 0 },
+        "storage_devices": { "$ref": "#/$defs/storageDevices" }
+      }
+    }
+  }
+}

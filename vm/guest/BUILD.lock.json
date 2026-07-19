@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "builder_image": {
+    "reference": null,
+    "status": "UNCONFIGURED"
+  },
+  "provenance": {
+    "required": true,
+    "status": "UNCONFIGURED",
+    "verifier": null
+  },
+  "reproducibility": {
+    "required": true,
+    "source_date_epoch": null,
+    "status": "UNCONFIGURED"
+  },
+  "trusted_keyring": {
+    "path": "vm/guest/trusted-keys",
+    "sha256": null,
+    "status": "UNCONFIGURED"
+  }
+}

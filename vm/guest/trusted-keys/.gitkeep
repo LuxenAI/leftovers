@@ -1,0 +1,5 @@
+# Intentionally empty.
+#
+# A reviewed maintainer must add only the public OpenPGP material needed for
+# upstream Buildroot and Linux signed-tag verification, then pin the canonical
+# tree digest in ../BUILD.lock.json.  This directory is not a credential store.

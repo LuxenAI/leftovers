@@ -1,3 +1,4 @@
+import ctypes
 import os
 import tempfile
 import unittest
@@ -6,12 +7,14 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
+import leftovers.runner as runner
 from leftovers.config import AgentConfig, SandboxConfig
 from leftovers.models import CommandResult
 from leftovers.prompts import RenderedPrompt
 from leftovers.runner import (
     AgentOutputError,
     AgentRunner,
+    RunnerCleanupError,
     RunnerError,
     _AdapterTelemetryMonitor,
     _validate_agent_payload,
@@ -20,6 +23,131 @@ from leftovers.runner import (
 
 
 class RunnerTests(unittest.TestCase):
+    def test_linux_child_subreaper_restores_only_state_it_enabled(self) -> None:
+        class FakePrctl:
+            def __init__(self, initial_value: int) -> None:
+                self.initial_value = initial_value
+                self.calls: list[tuple[int, int]] = []
+
+            def __call__(self, option: int, value: int, *_unused: int) -> int:
+                self.calls.append((option, value))
+                if option == runner._LINUX_PR_GET_CHILD_SUBREAPER:
+                    ctypes.cast(
+                        value, ctypes.POINTER(ctypes.c_int)
+                    ).contents.value = self.initial_value
+                return 0
+
+        class FakeLibc:
+            def __init__(self, initial_value: int) -> None:
+                self.prctl = FakePrctl(initial_value)
+
+        libc = FakeLibc(0)
+        with (
+            mock.patch.object(runner.sys, "platform", "linux"),
+            mock.patch("ctypes.CDLL", return_value=libc),
+        ):
+            subreaper = runner._ChildSubreaper()
+            subreaper.enable()
+            subreaper.restore()
+
+        self.assertEqual(
+            libc.prctl.calls,
+            [
+                (runner._LINUX_PR_GET_CHILD_SUBREAPER, mock.ANY),
+                (runner._LINUX_PR_SET_CHILD_SUBREAPER, 1),
+                (runner._LINUX_PR_SET_CHILD_SUBREAPER, 0),
+            ],
+        )
+
+        existing = FakeLibc(1)
+        with (
+            mock.patch.object(runner.sys, "platform", "linux"),
+            mock.patch("ctypes.CDLL", return_value=existing),
+        ):
+            subreaper = runner._ChildSubreaper()
+            subreaper.enable()
+            subreaper.restore()
+        self.assertEqual(existing.prctl.calls, [(runner._LINUX_PR_GET_CHILD_SUBREAPER, mock.ANY)])
+
+    def test_group_reaper_waits_only_for_the_owned_process_group(self) -> None:
+        with mock.patch.object(runner.os, "waitpid", side_effect=[(99, 0), (0, 0)]) as waitpid:
+            runner._reap_terminated_process_group_children(4242)
+
+        self.assertEqual(
+            waitpid.call_args_list,
+            [
+                mock.call(-4242, os.WNOHANG),
+                mock.call(-4242, os.WNOHANG),
+            ],
+        )
+
+    def test_ordinary_agent_runner_is_explicitly_rehearsal_only(self) -> None:
+        runner_instance = AgentRunner(
+            SandboxConfig(runtime="docker", image="image@sha256:abc"),
+            AgentConfig(command=("agent",)),
+        )
+        with self.assertRaisesRegex(RunnerError, "strict VM isolation.*rehearsal-only"):
+            runner_instance.assert_production_isolation()
+
+    def test_process_group_signal_failure_preserves_cleanup_identity(self) -> None:
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        with (
+            mock.patch.object(runner, "_process_group_is_alive", return_value=True),
+            mock.patch.object(runner.os, "killpg", side_effect=PermissionError("denied")),
+            self.assertRaises(RunnerCleanupError) as raised,
+        ):
+            runner._terminate_process_group(process)
+
+        self.assertEqual(raised.exception.process_group, 4242)
+        self.assertIn("cannot signal", str(raised.exception))
+
+    def test_cleanup_error_still_closes_all_child_pipes(self) -> None:
+        captured: list[object] = []
+        original_popen = runner.subprocess.Popen
+
+        def capture_process(*args: object, **kwargs: object) -> object:
+            process = original_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        cleanup_failure = RunnerCleanupError("owned process group remained live", 4242)
+        with (
+            mock.patch.object(runner.subprocess, "Popen", side_effect=capture_process),
+            mock.patch.object(
+                runner,
+                "_terminate_process_group",
+                side_effect=cleanup_failure,
+            ),
+            self.assertRaises(RunnerCleanupError) as raised,
+        ):
+            runner.execute(
+                [
+                    __import__("sys").executable,
+                    "-c",
+                    "import sys; sys.stdin.buffer.read()",
+                ],
+                cwd=None,
+                env={},
+                stdin="fixture",
+                timeout=5,
+                max_output_bytes=1_024,
+            )
+
+        self.assertIs(raised.exception, cleanup_failure)
+        self.assertEqual(len(captured), 1)
+        process = captured[0]
+        for stream in (process.stdin, process.stdout, process.stderr):
+            self.assertIsNotNone(stream)
+            self.assertTrue(stream.closed)
+        # The mocked cleanup failure deliberately prevents the production
+        # group terminator from reaping this fixture child. Closing stdin lets
+        # it exit; collect it here so the test itself never leaks a Popen or
+        # leaves an ambiguous zombie for later aggregate-suite garbage
+        # collection.
+        self.assertEqual(process.wait(timeout=5), 0)
+
     def test_host_agent_git_config_mutation_is_rejected_before_controller_git(self) -> None:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(root))
@@ -331,6 +459,22 @@ class RunnerTests(unittest.TestCase):
                 timeout=1,
             )
         cleanup.assert_called_once_with("run-123", "planning")
+
+    def test_container_cleanup_failure_does_not_mask_owned_process_group_failure(self) -> None:
+        runner = AgentRunner(
+            SandboxConfig(runtime="docker", image="image@sha256:abc"),
+            AgentConfig(command=("agent",)),
+        )
+        failure = RunnerCleanupError("owned process group remained live", 4242)
+        with (
+            mock.patch("leftovers.runner.execute", side_effect=failure),
+            mock.patch.object(runner, "_remove_container", return_value=False),
+            self.assertRaises(RunnerCleanupError) as raised,
+        ):
+            runner._execute_container(
+                ["docker", "run"], run_id="run-123", stage="planning", stdin=None, timeout=1
+            )
+        self.assertEqual(raised.exception.process_group, 4242)
 
     def test_cleanup_refuses_container_without_exact_ownership_labels(self) -> None:
         runner = AgentRunner(

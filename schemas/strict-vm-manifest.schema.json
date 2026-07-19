@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.invalid/schemas/strict-vm-manifest.schema.json",
+  "title": "Leftovers strict VM launch manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "boot_artifact_directory",
+    "run_directory",
+    "kernel",
+    "initrd",
+    "root_disk",
+    "scratch_disk",
+    "cpu_count",
+    "memory_bytes",
+    "wall_time_seconds"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "boot_artifact_directory": { "$ref": "#/$defs/absolutePath" },
+    "run_directory": { "$ref": "#/$defs/absolutePath" },
+    "kernel": { "$ref": "#/$defs/artifact" },
+    "initrd": { "$ref": "#/$defs/artifact" },
+    "root_disk": { "$ref": "#/$defs/artifact" },
+    "request_disk": { "$ref": "#/$defs/requestArtifact" },
+    "scratch_disk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 4294967296,
+          "multipleOf": 1048576
+        }
+      }
+    },
+    "cpu_count": { "type": "integer", "minimum": 1, "maximum": 4 },
+    "memory_bytes": {
+      "type": "integer",
+      "minimum": 536870912,
+      "maximum": 4294967296,
+      "multipleOf": 1048576
+    },
+    "wall_time_seconds": { "type": "integer", "minimum": 30, "maximum": 3600 }
+  },
+  "$defs": {
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^/"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "requestArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "allOf": [
+            { "$ref": "#/$defs/absolutePath" },
+            { "pattern": "/request\\.raw$" }
+          ]
+        },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

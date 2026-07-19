@@ -13,6 +13,9 @@ maintainer value and correctness, never PR count or token consumption for its ow
   targets.
 - Never send `GITHUB_TOKEN`, `GH_TOKEN`, a PAT, SSH agent, host credential directory, or runtime
   socket into a coding/test sandbox.
+- Treat host agents and the stock Docker/Podman runner as scout/rehearsal-only. Production
+  `run --execute` must fail before budget or discovery until the strict VM guest, credential-isolating
+  model mediation, and bounded post-stop result extraction are integrated and live-verified.
 - The coding agent cannot push, comment, fork, or open a PR. Only `publisher.py` can write to GitHub.
 - Remote writes require `draft-pr` mode, standing acknowledgement, and the `--publish` invocation
   capability. Never auto-merge or mark ready for review.
@@ -32,10 +35,14 @@ maintainer value and correctness, never PR count or token consumption for its ow
 3. Run `leftovers scout` and inspect the score breakdown and every gate result.
 4. Confirm the reported spendable budget (which already excludes the reserve) covers the larger of
    the configured minimum and the P95 estimate times the safety multiplier.
-5. Use `leftovers run --execute` for dry runs. Inspect the hash-chained journal under the configured
-   state directory.
-6. Only when the operator has authorized external writes, run with `--publish`; expect a draft PR.
-7. Verify the cleanup receipt proves managed containers were removed before the workspace, and keep
+5. In the current release, use `leftovers run --execute` only as a negative admission test: require
+   `policy_denied` before budget, discovery, acquisition, or model work.
+6. Do not enable contribution execution until a separately reviewed strict VM runner includes the
+   guest policy, narrow model mediator, bounded result extractor, and live escape/resource/cleanup
+   evidence. Exercise that path without remote writes first.
+7. Only when that boundary and the operator's external-write authorization are both present, run
+   with `--publish`; expect a draft PR.
+8. Verify the cleanup receipt proves managed containers were removed before the workspace, and keep
    the remote branch while the PR remains open.
 
 One invocation attempts at most one issue. Do not loop inside a run to exhaust quota; allow the
@@ -69,9 +76,12 @@ PYTHONPATH=src python3 -m leftovers --config config/leftovers.example.toml \
   training-run --mode process --profile auto
 ```
 
-Process training is supplemental. A release-quality sandbox claim requires the Docker/Podman
-training run and its successful cleanup evidence. The dashboard is a loopback-only read surface over
-non-authoritative telemetry; do not publish or expose it through a public bind/proxy.
+Process training is supplemental. Docker/Podman training and its cleanup receipt prove only the OCI
+rehearsal contract; they are not production-isolation evidence because the container shares the host
+kernel. A production boundary additionally requires the integrated strict VM guest, model mediator,
+result extractor, and live adversarial evidence. Even then, do not claim absolute escape-proofing.
+The dashboard is a loopback-only read surface over non-authoritative telemetry; do not publish or
+expose it through a public bind/proxy.
 
 Do not install host system packages. Keep the Python control plane dependency-free unless a reviewed
 change clearly justifies a dependency. Preserve strict config validation, argv-array execution,

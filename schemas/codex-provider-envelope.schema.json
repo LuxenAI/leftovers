@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.invalid/schemas/codex-provider-envelope.schema.json",
+  "title": "Leftovers untrusted Codex provider envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "round", "stage", "provider", "model", "reasoning_effort", "input_sha256", "actions", "patch"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "round": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "stage": {"enum": ["planning", "implementation", "final_verify", "review"]},
+    "provider": {"const": "openai-codex-cli"},
+    "model": {"const": "gpt-5.6-terra"},
+    "reasoning_effort": {"const": "high"},
+    "input_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "actions": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object"}},
+    "patch": {"type": ["string", "null"]}
+  }
+}

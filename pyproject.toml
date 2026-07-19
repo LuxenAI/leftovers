@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "leftovers-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn deliberately allocated, otherwise-unused agent quota into careful open-source contributions."
 readme = "README.md"
 requires-python = ">=3.11"

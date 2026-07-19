@@ -35,7 +35,7 @@ from .config import (
     ScoringConfig,
 )
 from .models import IssueCandidate, RepositoryMetadata, RunOutcome, RunStage, TokenUsage
-from .orchestrator import ContributionOrchestrator
+from .orchestrator import ContributionOrchestrator, _training_rehearsal_component
 from .runner import AgentRunner, CommandResult, RunnerError, execute
 from .statefs import private_directory, private_file
 from .workspace import WorkspaceError, WorkspaceLease
@@ -183,6 +183,7 @@ class RehearsalReport:
         }
 
 
+@_training_rehearsal_component("source")
 @dataclass(frozen=True)
 class RehearsalIssueSource:
     """In-memory issue source with no network-capable methods."""
@@ -240,6 +241,7 @@ class RehearsalIssueSource:
         ]
 
 
+@_training_rehearsal_component("lease_factory")
 class RehearsalWorkspaceLease(WorkspaceLease):
     """Materialize a fixed local Git repository instead of cloning a remote URL."""
 
@@ -307,6 +309,7 @@ class RehearsalWorkspaceLease(WorkspaceLease):
         return self.repo_path
 
 
+@_training_rehearsal_component("runner")
 class RehearsalRunner(AgentRunner):
     """Real AgentRunner with bounded recording and a process-only verification fallback."""
 
@@ -417,6 +420,41 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _process_rehearsal_adapter() -> Path:
+    configured = os.environ.get("LEFTOVERS_REHEARSAL_AGENT")
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise RehearsalError("LEFTOVERS_REHEARSAL_AGENT must be an absolute path")
+        return candidate
+    return _project_root() / "scripts" / "rehearsal_agent.py"
+
+
+def _controller_command() -> tuple[str, ...]:
+    configured = os.environ.get("LEFTOVERS_LAUNCHER")
+    if configured:
+        launcher = Path(configured).expanduser()
+        if not launcher.is_absolute() or launcher.is_symlink() or not os.access(launcher, os.X_OK):
+            raise RehearsalError("LEFTOVERS_LAUNCHER must be an absolute executable file")
+        return (str(launcher),)
+    # A source checkout keeps the importable package below src/. The Seatbelt
+    # child deliberately receives no ambient PYTHONPATH, so invoke the trusted
+    # absolute source entrypoint instead of depending on the parent's shell
+    # environment. Installed wheels fall back to their normal module entry.
+    source_entry = _project_root() / "src" / "__main__.py"
+    try:
+        source_info = source_entry.lstat()
+    except OSError:
+        source_info = None
+    if (
+        source_info is not None
+        and stat.S_ISREG(source_info.st_mode)
+        and not stat.S_ISLNK(source_info.st_mode)
+    ):
+        return (sys.executable, str(source_entry))
+    return (sys.executable, "-m", "leftovers")
+
+
 def build_rehearsal_config(
     root: Path,
     *,
@@ -430,7 +468,7 @@ def build_rehearsal_config(
     root = root.expanduser().resolve()
     now = datetime.now(UTC)
     if mode == "process":
-        script = _project_root() / "scripts" / "rehearsal_agent.py"
+        script = _process_rehearsal_adapter()
         if script.is_symlink() or not script.is_file():
             raise RehearsalError("controller-owned rehearsal adapter is missing or unsafe")
         backend = "host"

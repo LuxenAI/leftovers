@@ -20,3 +20,6 @@ shape:
 
 Use `status: "blocked"` with a factual `reason` when the issue is not reproducible, requires a
 maintainer decision, conflicts with repository policy, or cannot fit the supplied limits.
+`estimated_remaining_tokens` must conservatively cover all expected implementation and independent
+review input/output after this planning call; it is an admission estimate, not a provider-enforced
+ceiling.

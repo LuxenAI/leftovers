@@ -39,8 +39,9 @@ uncertainty.
 
 ## Stateful reservations
 
-An execute run reserves `estimated_tokens_p95 * safety_multiplier` in
-`<state_dir>/budget.sqlite3` before creating a workspace. The SQLite transaction sums every
+Once a strict runner is integrated and production execution is admitted, an execute run reserves
+`estimated_tokens_p95 * safety_multiplier` in `<state_dir>/budget.sqlite3` before creating a
+workspace. The SQLite transaction sums every
 non-released reservation in the configured daily or weekly window, using `budget.timezone`,
 `reset_hour`, and (for weekly windows) `reset_weekday`. This prevents two scheduler invocations from
 treating one fixed/manual snapshot as independently spendable.

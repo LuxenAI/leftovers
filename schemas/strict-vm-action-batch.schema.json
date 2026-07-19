@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leftovers.invalid/schemas/strict-vm-action-batch.schema.json",
+  "title": "Leftovers strict VM inference-only action batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "round",
+    "stage",
+    "provider",
+    "model",
+    "reasoning_effort",
+    "actions"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "round": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "stage": {"enum": ["planning", "implementation", "final_verify", "review"]},
+    "provider": {"$ref": "#/$defs/boundIdentifier"},
+    "model": {"$ref": "#/$defs/boundIdentifier"},
+    "reasoning_effort": {"enum": ["low", "medium", "high"]},
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "contains": {"$ref": "#/$defs/finish"},
+      "minContains": 1,
+      "maxContains": 1,
+      "items": {"$ref": "#/$defs/action"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"stage": {"enum": ["planning", "review"]}}},
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "oneOf": [
+                {"$ref": "#/$defs/readFile"},
+                {"$ref": "#/$defs/listDir"},
+                {"$ref": "#/$defs/searchLiteral"},
+                {"$ref": "#/$defs/finish"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"stage": {"const": "implementation"}}},
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "oneOf": [
+                {"$ref": "#/$defs/readFile"},
+                {"$ref": "#/$defs/listDir"},
+                {"$ref": "#/$defs/searchLiteral"},
+                {"$ref": "#/$defs/applyPatch"},
+                {"$ref": "#/$defs/finish"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"stage": {"const": "final_verify"}}},
+      "then": {
+        "properties": {
+          "actions": {
+            "contains": {"$ref": "#/$defs/runCheck"},
+            "minContains": 1,
+            "items": {
+              "oneOf": [
+                {"$ref": "#/$defs/runCheck"},
+                {"$ref": "#/$defs/finish"}
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "boundIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "actionId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "safePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\\\:]+$"
+    },
+    "readFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "path", "offset", "max_bytes"],
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "type": {"const": "read_file"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "offset": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}
+      }
+    },
+    "listDir": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "path", "max_entries"],
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "type": {"const": "list_dir"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "max_entries": {"type": "integer", "minimum": 1, "maximum": 1024}
+      }
+    },
+    "searchLiteral": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "path", "literal", "max_matches"],
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "type": {"const": "search_literal"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "literal": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "max_matches": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "applyPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "patch_sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "type": {"const": "apply_patch"},
+        "patch_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "runCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "check_id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "type": {"const": "run_check"},
+        "check_id": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}
+      }
+    },
+    "finish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "status", "summary"],
+      "properties": {
+        "id": {"$ref": "#/$defs/actionId"},
+        "type": {"const": "finish"},
+        "status": {"enum": ["complete", "blocked", "failed"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 4096}
+      }
+    },
+    "action": {
+      "oneOf": [
+        {"$ref": "#/$defs/readFile"},
+        {"$ref": "#/$defs/listDir"},
+        {"$ref": "#/$defs/searchLiteral"},
+        {"$ref": "#/$defs/applyPatch"},
+        {"$ref": "#/$defs/runCheck"},
+        {"$ref": "#/$defs/finish"}
+      ]
+    }
+  }
+}

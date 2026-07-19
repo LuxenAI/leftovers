@@ -19,7 +19,10 @@ review—not more unsolicited pull requests.
   runs too close to reset are rejected.
 - Planning and implementation prompt contracts, fresh independent review, and deterministic
   controller-rendered draft-PR text from verified evidence.
-- Docker/Podman command construction with no GitHub credential in the worker.
+- Docker/Podman rehearsal command construction with no GitHub credential in the worker; the stock
+  runner cannot attest production isolation and is rejected before quota or discovery.
+- A Docker Sandboxes (`sbx`) compatibility candidate with a separately invokable, no-agent shell
+  rehearsal. It is not a provider or Terra/high run, and its production backend is source-disabled.
 - Offline operator-curated verification commands plus structural rename/file-mode, dependency,
   license, secret, size, and forbidden-path gates.
 - A hash-chained redacted audit journal plus label-checked container cleanup that must complete before
@@ -34,6 +37,12 @@ review—not more unsolicited pull requests.
   repository cooldowns, early publish-eligibility preflight, and fail-closed partial-publication
   handling.
 - Daily/weekly scheduler templates and a container-first CI/test path.
+- A portable macOS **scout-only** bundle: it performs read-only repository nomination and a
+  synthetic Seatbelt rehearsal, but has no reachable host/OCI contribution-execution path.
+- Archival, source-disabled Virtualization.framework research with a fixed Linux hardware graph,
+  manifest-v2 separation between immutable boot artifacts and sealed per-run inputs, a preallocated
+  scratch disk, and zero NIC, socket, or host directory-share devices. It remains fail-closed and is
+  not the active operator integration path.
 
 ## System boundary
 
@@ -78,6 +87,71 @@ or broker cutoff when the provider supports one.
 
 ## Quick start
 
+### macOS: one bounded preview for tonight
+
+From this repository on a signed-in macOS user account, run:
+
+```sh
+./scripts/install-macos.sh --force-config --scout
+```
+
+This creates a private bundle under `.leftovers/install`, validates its deliberately safe
+configuration, runs a synthetic Seatbelt rehearsal, performs one read-only repository scan, and
+exits. It does not depend on this chat or on the Codex desktop app process. It needs a saved Codex CLI
+login, a Terra-capable Codex CLI (`0.144.5+`), Python 3.11+, Git, `sandbox-exec`, and an authenticated
+`gh` CLI for read-only GitHub scouting. It never asks for or writes a GitHub token; it obtains the
+existing `gh auth token` in memory only for the read request.
+
+This is **not** a contribution-execution or publishing installation. Its configuration contains a
+non-executable placeholder repository, external writes are disabled, the scout receives no
+Codex credential path, and a build-time gate stops after read-only scouting. Docker/Podman and the
+host adapter are rehearsal-only even if installed. The candidate report is
+`.leftovers/install/reports/repository-candidates.json`; manual curation does not bypass the strict
+execution-evidence gate. See
+[`docs/MACOS_PACKAGE.md`](docs/MACOS_PACKAGE.md) for its exact prerequisites, limits, cleanup, and
+strict-VM status.
+
+The foreground `--scout` command is the safe choice for checkouts under macOS-protected Desktop,
+Documents, or Downloads folders. `--launch-now` is available only from a checkout outside those
+folders; the installer fails before mutation instead of asking for Full Disk Access. Check the
+result with `./scripts/status-macos.sh`; remove the manifest-bound package with
+`./scripts/uninstall-macos.sh`. Build a reproducible transfer archive with `make macos-package`.
+
+### Docker Sandboxes candidate: standalone shell rehearsal
+
+On a separately prepared normal-user account, the standalone command for tonight is:
+
+```sh
+./scripts/sbx-rehearsal.sh --execute
+```
+
+If Docker Sandboxes is not installed yet, bootstrap it first:
+
+```sh
+brew trust docker/tap
+brew install docker/tap/sbx
+```
+
+Then authenticate and harden policy/credentials before the rehearsal:
+
+```sh
+sbx login
+sbx policy init deny-all
+sbx policy allow network \
+  "api.openai.com:443,openai.com:443,chatgpt.com:443,www.chatgpt.com:443"
+sbx secret set -g openai --oauth
+```
+
+It resolves the checkout itself and runs independently of this chat or the Codex desktop app. It
+creates, probes, and removes one randomly controller-named clone-mode **shell** sandbox after
+read-only checks. It does not start Codex, call OpenAI, request `gpt-5.6-terra`/`high`, consume model
+quota, read GitHub, or publish. Prepare the exact global `openai` service secret and Locked Down
+policy first; the required `sbx policy allow network ...` command, current Keychain `-50` blocker,
+and economical resource/token safeguards are in
+[`docs/DOCKER_SANDBOXES.md`](docs/DOCKER_SANDBOXES.md). A successful result is rehearsal evidence
+only: name-based lifecycle checks are not sandbox-ownership attestation, and the production
+contribution path remains source-disabled.
+
 1. Copy and curate the example configuration:
 
    ```sh
@@ -113,25 +187,30 @@ or broker cutoff when the provider supports one.
    PYTHONPATH=src python3 -m leftovers --config config/leftovers.toml scout
    ```
 
-6. After reviewing several dry runs, execute one disposable cycle:
+6. Confirm production execution fails closed before discovery:
 
    ```sh
    PYTHONPATH=src python3 -m leftovers --config config/leftovers.toml run --execute
    ```
 
-Execution requires the configured agent command and container runtime. The stock sandbox image does
-not embed a model provider or credentials; derive a provider-specific image or use a trusted host
-CLI with its own sandbox. No runnable provider adapter ships in v0.1, and the host option is
-explicitly lower assurance. See [`docs/AGENT_ADAPTERS.md`](docs/AGENT_ADAPTERS.md) for the exact
-stdin/result-file contract and credential tradeoffs.
+The stock sandbox image does not embed a model provider or credentials. At present the command above
+returns `policy_denied` before either an agent command or container runtime is invoked:
+the stock `AgentRunner`, every host backend, bridge networking, and ambient environment forwarding
+are all forbidden for production. The bundled `scripts/codex_adapter.py` pins
+`gpt-5.6-terra` / `high`, but is retained only for bounded adapter tests and cannot be launched by
+the detached job. See
+[`docs/AGENT_ADAPTERS.md`](docs/AGENT_ADAPTERS.md) for the exact stdin/result-file contract and
+credential tradeoffs.
 
 ## Prove the control plane before using it
 
 The rehearsal is a real contribution lifecycle over a controller-owned local Git fixture. It has no
 remote, never invokes the publisher, reports synthetic usage, and leaves its audit/telemetry evidence
-under a unique owner-only root in `<state_dir>/rehearsals/`.
+under a unique owner-only root in `<state_dir>/rehearsals/`. `run_kind="training"` is not a public
+escape hatch: it accepts only the attested rehearsal runner/source/lease triple with the fixed
+deterministic identity, no network or environment forwarding, and dry-run publication.
 
-For the production-faithful OCI proof:
+For the deterministic OCI rehearsal:
 
 ```sh
 make rehearsal-image
@@ -171,6 +250,10 @@ release reservations, or authorize publication. See [`docs/TELEMETRY.md`](docs/T
 
 ## Enabling draft PRs
 
+This section documents the publication contract for a future admitted strict runner. In the current
+release, neither publication configuration nor `--publish` can bypass the earlier production
+isolation gate; host and stock OCI paths remain unable to reach the publisher.
+
 Publication needs all three gates:
 
 1. `publication.mode = "draft-pr"`;
@@ -199,17 +282,25 @@ access, keep its credential controller-only, and cap output to one active PR per
 
 ## Safety profiles
 
-- **Local profile:** Docker/Podman with the hardening flags in `runner.py`. Suitable for curated,
-  lower-risk repositories; a container is not a VM boundary. Rootlessness or a runtime VM is an
-  operator-provided property in v0.1, not something the controller proves.
-- **High-assurance profile:** a fresh VM or microVM per job, with a rootless container inside it,
-  immutable dependency bundles, a canonical tree-diff inspector, and just-in-time publisher tokens.
-  The architecture defines this profile, but the v0.1 implementation does not yet provision VMs.
-- **Host-agent profile:** uses a provider CLI's own sandbox for model access and still runs configured
-  checks in the container. It is the least isolated option and `doctor` warns about it.
+- **OCI rehearsal profile:** Docker/Podman with the hardening flags in `runner.py`. It proves
+  deterministic control-plane behavior but is not admitted for unattended repository execution.
+- **Docker Sandboxes candidate:** the `sbx` rehearsal can prove a narrow shell-only lifecycle for a
+  pinned CLI and finite policy canaries. It does not make a provider/Terra call, is not a complete
+  policy attestation, and cannot enable `leftovers run --execute`.
+- **Archival strict-VM proof:** [`vm/README.md`](vm/README.md) documents a per-run, zero-NIC
+  Virtualization.framework launcher. The launcher, sealed request/result format, cleanup lease,
+  one-epoch controller, rejection-only guest source, Codex output parser, and dedicated-broker
+  protocol model have deterministic tests. The guest has not been built or booted, provider and
+  broker services do not exist, broker attestations cannot be issued, and every execution gate is
+  hard-disabled; production therefore remains disabled.
+- **Host-agent profile:** the bundled Codex adapter runs `gpt-5.6-terra` at `high` reasoning through
+  the saved CLI login, with ephemeral sessions, no inherited shell environment, no agent network,
+  structured outputs, and hard per-stage time limits. It is test/rehearsal-only, is rejected before
+  production discovery, and cannot publish.
 
-Do not autonomously run intentionally hostile repositories with only the local profile. Review the
-remaining v0.1 gaps in [`SECURITY.md`](SECURITY.md) before enabling writes.
+Do not autonomously run intentionally hostile repositories with either the host or OCI rehearsal
+profile. Review the remaining gaps in [`SECURITY.md`](SECURITY.md); configuration changes alone
+cannot enable production writes.
 
 ## Repository map
 
@@ -218,6 +309,14 @@ remaining v0.1 gaps in [`SECURITY.md`](SECURITY.md) before enabling writes.
 - [`PROTOCOL.md`](PROTOCOL.md): prompt/result contracts and state invariants.
 - [`SECURITY.md`](SECURITY.md): threat model, hard gates, and assurance limits.
 - [`docs/AGENT_ADAPTERS.md`](docs/AGENT_ADAPTERS.md): provider adapter contract and v0.1 limits.
+- [`docs/MACOS_PACKAGE.md`](docs/MACOS_PACKAGE.md): portable macOS preview installation, detached
+  job, curation, verification, and footprint.
+- [`vm/README.md`](vm/README.md): strict macOS VM device contract, launcher receipt, and remaining
+  guest/broker blockers.
+- [`docs/CODEX_CLI_MEDIATOR.md`](docs/CODEX_CLI_MEDIATOR.md): hard-disabled Terra/high inference,
+  usage-evidence, and token-ledger boundary.
+- [`docs/STRICT_VM_BROKER.md`](docs/STRICT_VM_BROKER.md): dedicated-UID broker protocol model and
+  activation blockers.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md): activation, scheduler installation, and recovery.
 - [`docs/TELEMETRY.md`](docs/TELEMETRY.md): exact quota/check-in semantics, dashboard boundary, and
   rehearsal evidence.
@@ -229,5 +328,7 @@ remaining v0.1 gaps in [`SECURITY.md`](SECURITY.md) before enabling writes.
 
 ## Project state and license
 
-This is an initial operational scaffold. It defaults to dry-run and requires deliberate repository
-curation. Licensed under Apache-2.0; see [`LICENSE`](LICENSE).
+This is an initial operational scaffold. It defaults to dry-run, requires deliberate repository
+curation, and currently denies production issue execution until the strict execution-evidence
+contract is integrated and live-attested; the current code keeps that path source-disabled.
+Licensed under Apache-2.0; see [`LICENSE`](LICENSE).

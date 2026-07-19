@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import stat
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 
 from .config import GitHubConfig, RepositoryConfig
 from .models import IssueCandidate, RepositoryMetadata
@@ -28,6 +30,102 @@ class IssueSource(Protocol):
     ) -> list[IssueCandidate]: ...
 
 
+@dataclass(frozen=True)
+class SourceCapsule:
+    """Opaque, immutable repository bytes acquired without host extraction."""
+
+    repository: str
+    base_sha: str
+    path: Path
+    sha256: str
+    size_bytes: int
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Make every redirect visible so credentials can be stripped explicitly."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: BinaryIO,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+@dataclass(frozen=True)
+class RepositorySupplyCriteria:
+    """Read-only repository-supply screen; it never grants execution authority."""
+
+    min_stars: int = 100
+    max_stars: int = 3_000
+    min_open_issues: int = 30
+    max_open_issues: int = 200
+    max_open_prs: int = 12
+    min_issue_pr_ratio: float = 8.0
+    pushed_within_days: int = 90
+    fresh_issue_days: int = 180
+    min_fresh_invited_issues: int = 3
+    min_recent_human_activity: int = 2
+    scan_limit: int = 25
+    result_limit: int = 10
+
+
+@dataclass(frozen=True)
+class RepositorySupplyCandidate:
+    slug: str
+    url: str
+    stars: int
+    open_issues: int
+    open_pull_requests: int
+    issue_pr_ratio: float
+    help_wanted_issues: int
+    good_first_issues: int
+    fresh_unassigned_invited_issues: int
+    recent_human_merged_prs: int
+    recent_human_closed_issues: int
+    pushed_at: datetime
+    license_spdx: str
+    default_branch: str
+    score: float
+    forking_allowed: bool
+    pull_requests_enabled: bool
+    pull_request_creation_policy: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repository": self.slug,
+            "url": self.url,
+            "stars": self.stars,
+            "open_issues": self.open_issues,
+            "open_pull_requests": self.open_pull_requests,
+            "issue_pr_ratio": self.issue_pr_ratio,
+            "help_wanted_issues": self.help_wanted_issues,
+            "good_first_issues": self.good_first_issues,
+            "fresh_unassigned_invited_issues": self.fresh_unassigned_invited_issues,
+            "recent_human_merged_prs": self.recent_human_merged_prs,
+            "recent_human_closed_issues": self.recent_human_closed_issues,
+            "pushed_at": self.pushed_at.isoformat(),
+            "license_spdx": self.license_spdx,
+            "default_branch": self.default_branch,
+            "score": self.score,
+            "forking_allowed": self.forking_allowed,
+            "pull_requests_enabled": self.pull_requests_enabled,
+            "pull_request_creation_policy": self.pull_request_creation_policy,
+            "execution_authorized": False,
+            "manual_review_required": [
+                "confirm the repository's current AI-assisted contribution policy",
+                "confirm contribution guide, CLA or DCO, and issue-claim etiquette",
+                "curate an offline setup and exact verification argv",
+                "add an explicit allowlist entry in reviewed configuration",
+            ],
+        }
+
+
 def _parse_time(value: object) -> datetime | None:
     if value is None or value == "":
         return None
@@ -39,6 +137,15 @@ def _parse_time(value: object) -> datetime | None:
         raise GitHubError("GitHub returned an invalid timestamp") from exc
 
 
+def _bot_login(login: str) -> bool:
+    normalized = login.casefold()
+    return normalized.endswith("[bot]") or normalized in {
+        "dependabot",
+        "github-actions",
+        "renovate-bot",
+    }
+
+
 @dataclass
 class GitHubClient:
     config: GitHubConfig
@@ -47,6 +154,245 @@ class GitHubClient:
         self._token = os.environ.get(self.config.token_env)
         self._requests = 0
         self._repos: dict[str, RepositoryMetadata] = {}
+
+    def _reserve_read_request(self) -> None:
+        if self._requests >= self.config.max_read_requests_per_run:
+            raise GitHubError("configured GitHub read-request ceiling reached")
+        self._requests += 1
+
+    @staticmethod
+    def _capsule_parent(destination: Path) -> int:
+        if not destination.is_absolute() or destination.name in {"", ".", ".."}:
+            raise GitHubError("source-capsule destination must be a direct absolute file path")
+        try:
+            parent = destination.parent.lstat()
+        except OSError as exc:
+            raise GitHubError("source-capsule parent is unavailable") from exc
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
+            raise GitHubError("source-capsule parent must be an owner-private directory")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(destination.parent, flags)
+        except OSError as exc:
+            raise GitHubError("source-capsule parent cannot be opened safely") from exc
+
+    @staticmethod
+    def _validated_codeload_url(location: str, slug: str, base_sha: str) -> str:
+        if not isinstance(location, str) or len(location) > 2_048:
+            raise GitHubError("GitHub archive redirect is missing or oversized")
+        try:
+            parsed = urllib.parse.urlsplit(location)
+            port = parsed.port
+        except ValueError as exc:
+            raise GitHubError("GitHub archive redirect URL is malformed") from exc
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "codeload.github.com"
+            or port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise GitHubError("GitHub archive redirect target is not an approved codeload URL")
+        decoded = urllib.parse.unquote(parsed.path)
+        if urllib.parse.quote(decoded, safe="/-._~") != parsed.path:
+            raise GitHubError("GitHub archive redirect path is not canonical")
+        owner, repository = slug.split("/", 1)
+        expected = {
+            f"/{owner}/{repository}/legacy.tar.gz/{base_sha}".casefold(),
+            f"/{owner}/{repository}/tar.gz/{base_sha}".casefold(),
+        }
+        if decoded.casefold() not in expected:
+            raise GitHubError("GitHub archive redirect does not bind the requested repository SHA")
+        return location
+
+    def download_source_capsule(
+        self,
+        slug: str,
+        base_sha: str,
+        destination: Path,
+        *,
+        max_bytes: int = 128 * 1_024 * 1_024,
+    ) -> SourceCapsule:
+        """Stream a public repository archive as opaque, sealed bytes.
+
+        The authenticated API request is never allowed to redirect implicitly.
+        The second request is constructed from scratch without authorization and
+        is restricted to the exact public codeload host/path for ``base_sha``.
+        The host does not inspect or extract archive contents.
+        """
+
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", slug) is None:
+            raise GitHubError("source-capsule repository slug is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+            raise GitHubError("source-capsule base SHA must be exactly 40 lowercase hex characters")
+        if type(max_bytes) is not int or not 1_024 <= max_bytes <= 256 * 1_024 * 1_024:
+            raise GitHubError("source-capsule byte cap is outside conservative bounds")
+        destination = Path(destination)
+        parent_descriptor = self._capsule_parent(destination)
+        try:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                _RejectRedirects(),
+            )
+            api_url = self.config.api_url.rstrip("/") + f"/repos/{slug}/tarball/{base_sha}"
+            api_headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": self.config.api_version,
+                "User-Agent": "leftovers-agent/0.2",
+            }
+            if self._token:
+                api_headers["Authorization"] = f"Bearer {self._token}"
+            self._reserve_read_request()
+            redirect_error: urllib.error.HTTPError | None = None
+            try:
+                request = urllib.request.Request(api_url, method="GET", headers=api_headers)
+                try:
+                    response = opener.open(request, timeout=self.config.request_timeout_seconds)
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in {301, 302, 303, 307, 308}:
+                        try:
+                            raise GitHubError(
+                                f"GitHub archive request returned HTTP {exc.code}",
+                                status=exc.code,
+                                retryable=exc.code in {429, 500, 502, 503, 504},
+                            ) from exc
+                        finally:
+                            exc.close()
+                    redirect_error = exc
+                    location = exc.headers.get("Location")
+                except urllib.error.URLError as exc:
+                    raise GitHubError("GitHub archive request failed", retryable=True) from exc
+                else:
+                    response.close()
+                    raise GitHubError(
+                        "GitHub archive request did not use the required explicit redirect"
+                    )
+                assert redirect_error is not None
+                codeload_url = self._validated_codeload_url(location, slug, base_sha)
+            finally:
+                if redirect_error is not None:
+                    redirect_error.close()
+        except BaseException:
+            os.close(parent_descriptor)
+            raise
+
+        try:
+            self._reserve_read_request()
+        except BaseException:
+            os.close(parent_descriptor)
+            raise
+        public_request = urllib.request.Request(
+            codeload_url,
+            method="GET",
+            headers={
+                "Accept": "application/octet-stream",
+                "User-Agent": "leftovers-agent/0.2",
+            },
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        created = False
+        try:
+            try:
+                response = opener.open(public_request, timeout=self.config.request_timeout_seconds)
+            except urllib.error.HTTPError as exc:
+                try:
+                    raise GitHubError(
+                        f"GitHub codeload request returned HTTP {exc.code}",
+                        status=exc.code,
+                        retryable=exc.code in {429, 500, 502, 503, 504},
+                    ) from exc
+                finally:
+                    exc.close()
+            except urllib.error.URLError as exc:
+                raise GitHubError("GitHub codeload request failed", retryable=True) from exc
+            with response:
+                final_url = response.geturl()
+                self._validated_codeload_url(final_url, slug, base_sha)
+                status_code = response.getcode()
+                if status_code != 200:
+                    raise GitHubError(f"GitHub codeload returned unexpected HTTP {status_code}")
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                    except ValueError as exc:
+                        raise GitHubError(
+                            "GitHub codeload returned an invalid Content-Length"
+                        ) from exc
+                    if not 1 <= declared_length <= max_bytes:
+                        raise GitHubError("GitHub source archive exceeds the configured byte cap")
+                try:
+                    descriptor = os.open(
+                        destination.name,
+                        flags,
+                        0o600,
+                        dir_fd=parent_descriptor,
+                    )
+                    created = True
+                except OSError as exc:
+                    raise GitHubError("source-capsule output cannot be created safely") from exc
+                digest = hashlib.sha256()
+                total = 0
+                while True:
+                    chunk = response.read(min(1_048_576, max_bytes - total + 1))
+                    if not chunk:
+                        break
+                    if not isinstance(chunk, bytes):
+                        raise GitHubError("GitHub codeload returned a non-byte response")
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise GitHubError("GitHub source archive exceeded the configured byte cap")
+                    digest.update(chunk)
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise GitHubError("source-capsule write made no progress")
+                        view = view[written:]
+                if total == 0:
+                    raise GitHubError("GitHub source archive was empty")
+                if content_length is not None and total != declared_length:
+                    raise GitHubError("GitHub source archive length did not match Content-Length")
+                os.fchmod(descriptor, 0o400)
+                os.fsync(descriptor)
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o400
+                    or info.st_nlink != 1
+                    or info.st_size != total
+                ):
+                    raise GitHubError("sealed source-capsule identity is unsafe")
+                os.close(descriptor)
+                descriptor = None
+                os.fsync(parent_descriptor)
+                return SourceCapsule(slug, base_sha, destination, digest.hexdigest(), total)
+        except BaseException:
+            if descriptor is not None:
+                os.close(descriptor)
+            if created:
+                try:
+                    os.unlink(destination.name, dir_fd=parent_descriptor)
+                    os.fsync(parent_descriptor)
+                except OSError as exc:
+                    raise GitHubError("source-capsule cleanup could not be proven") from exc
+                try:
+                    os.stat(destination.name, dir_fd=parent_descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise GitHubError("source-capsule cleanup could not prove path absence")
+            raise
+        finally:
+            os.close(parent_descriptor)
 
     def _request(
         self,
@@ -178,6 +524,346 @@ query LeftoversRepositoryControls($owner: String!, $name: String!) {
         if not isinstance(repository.get("pullRequestCreationPolicy"), str):
             raise GitHubError("GitHub repository PR policy has an invalid shape")
         return repository
+
+    def discover_repository_supply(
+        self,
+        criteria: RepositorySupplyCriteria,
+        *,
+        observed_at: datetime | None = None,
+    ) -> list[RepositorySupplyCandidate]:
+        """Find review candidates with many issues and relatively few open PRs.
+
+        GitHub's REST ``open_issues_count`` includes pull requests, so this screen uses
+        independent GraphQL connections for the two exact counts. Results are deliberately
+        non-authoritative: they are never added to ``repositories`` and always require manual
+        policy and verification curation before an execution run.
+        """
+
+        if not self._token:
+            raise GitHubError(
+                "repository-supply scouting requires an authenticated GitHub read token"
+            )
+        if (
+            criteria.min_stars < 1
+            or criteria.max_stars < criteria.min_stars
+            or criteria.min_open_issues < 1
+            or criteria.max_open_issues < criteria.min_open_issues
+            or criteria.max_open_prs < 0
+            or criteria.min_issue_pr_ratio < 1
+            or not 1 <= criteria.pushed_within_days <= 365
+            or not 1 <= criteria.fresh_issue_days <= 365
+            or not 1 <= criteria.min_fresh_invited_issues <= 100
+            or not 0 <= criteria.min_recent_human_activity <= 100
+            or not 1 <= criteria.scan_limit <= 50
+            or not 1 <= criteria.result_limit <= criteria.scan_limit
+        ):
+            raise GitHubError("repository-supply criteria are outside conservative bounds")
+
+        observed = (observed_at or datetime.now(UTC)).astimezone(UTC)
+        cutoff = (observed - timedelta(days=criteria.pushed_within_days)).date().isoformat()
+        query = " ".join(
+            (
+                f"stars:{criteria.min_stars}..{criteria.max_stars}",
+                "size:<50000",
+                "archived:false",
+                "fork:false",
+                f"pushed:>={cutoff}",
+                "help-wanted-issues:5..100",
+            )
+        )
+        response = self._request(
+            "GET",
+            "/search/repositories",
+            query={
+                "q": query,
+                "sort": "updated",
+                "order": "desc",
+                "per_page": criteria.scan_limit,
+            },
+        )
+        if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+            raise GitHubError("GitHub repository-search response has an invalid shape")
+
+        candidates: list[RepositorySupplyCandidate] = []
+        seen: set[str] = set()
+        for item in response["items"]:
+            if not isinstance(item, dict) or not isinstance(item.get("full_name"), str):
+                raise GitHubError("GitHub repository-search item has an invalid shape")
+            slug = item["full_name"]
+            if slug in seen or re.fullmatch(r"[^/\s]+/[^/\s]+", slug) is None:
+                continue
+            seen.add(slug)
+            candidate = self._repository_supply_details(slug, observed, criteria)
+            if candidate is None:
+                continue
+            if not (
+                criteria.min_stars <= candidate.stars <= criteria.max_stars
+                and criteria.min_open_issues <= candidate.open_issues <= criteria.max_open_issues
+                and candidate.open_pull_requests <= criteria.max_open_prs
+                and candidate.issue_pr_ratio >= criteria.min_issue_pr_ratio
+                and candidate.pushed_at >= observed - timedelta(days=criteria.pushed_within_days)
+                and candidate.fresh_unassigned_invited_issues >= criteria.min_fresh_invited_issues
+                and (candidate.recent_human_merged_prs + candidate.recent_human_closed_issues)
+                >= criteria.min_recent_human_activity
+                and candidate.pull_request_creation_policy == "ALL"
+            ):
+                continue
+            candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda value: (
+                value.score,
+                value.issue_pr_ratio,
+                value.open_issues,
+                value.stars,
+                value.slug.casefold(),
+            ),
+            reverse=True,
+        )
+        return candidates[: criteria.result_limit]
+
+    def _repository_supply_details(
+        self,
+        slug: str,
+        observed_at: datetime,
+        criteria: RepositorySupplyCriteria,
+    ) -> RepositorySupplyCandidate | None:
+        owner, name = slug.split("/", 1)
+        response = self._request(
+            "POST",
+            "https://api.github.com/graphql",
+            body={
+                "query": """
+query LeftoversRepositorySupply($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    url
+    description
+    isArchived
+    isDisabled
+    isFork
+    isLocked
+    isMirror
+    isTemplate
+    stargazerCount
+    pushedAt
+    defaultBranchRef { name }
+    licenseInfo { spdxId }
+    issues(states: OPEN) { totalCount }
+    pullRequests(states: OPEN) { totalCount }
+    helpWanted: issues(
+      states: OPEN
+      labels: ["help wanted"]
+      first: 20
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      totalCount
+      nodes { id updatedAt assignees { totalCount } }
+    }
+    goodFirst: issues(
+      states: OPEN
+      labels: ["good first issue"]
+      first: 20
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      totalCount
+      nodes { id updatedAt assignees { totalCount } }
+    }
+    recentMerged: pullRequests(
+      states: MERGED
+      first: 20
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      nodes { mergedAt author { login } }
+    }
+    recentClosed: issues(
+      states: CLOSED
+      first: 20
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      nodes { closedAt author { login } }
+    }
+    forkingAllowed
+    hasPullRequestsEnabled
+    pullRequestCreationPolicy
+  }
+}
+""",
+                "variables": {"owner": owner, "name": name},
+            },
+        )
+        if not isinstance(response, dict) or response.get("errors"):
+            raise GitHubError("GitHub GraphQL repository-supply query returned an error")
+        data = response.get("data")
+        repository = data.get("repository") if isinstance(data, dict) else None
+        if repository is None:
+            return None
+        if not isinstance(repository, dict):
+            raise GitHubError("GitHub repository-supply data has an invalid shape")
+        try:
+            if any(
+                type(repository.get(key)) is not bool
+                for key in (
+                    "isArchived",
+                    "isDisabled",
+                    "isFork",
+                    "isLocked",
+                    "isMirror",
+                    "isTemplate",
+                    "forkingAllowed",
+                    "hasPullRequestsEnabled",
+                )
+            ):
+                raise TypeError("repository controls")
+            if (
+                repository["isArchived"]
+                or repository["isDisabled"]
+                or repository["isFork"]
+                or repository["isLocked"]
+                or repository["isMirror"]
+                or repository["isTemplate"]
+                or not repository["forkingAllowed"]
+                or not repository["hasPullRequestsEnabled"]
+            ):
+                return None
+            name_with_owner = repository["nameWithOwner"]
+            url = repository["url"]
+            policy = repository["pullRequestCreationPolicy"]
+            if not all(
+                isinstance(value, str) and value for value in (name_with_owner, url, policy)
+            ):
+                raise TypeError("repository identity")
+            if name_with_owner.casefold() != slug.casefold():
+                raise TypeError("repository identity mismatch")
+            description = repository.get("description")
+            if description is not None and not isinstance(description, str):
+                raise TypeError("repository description")
+            tutorial_text = f"{name_with_owner} {description or ''}".casefold()
+            if any(
+                phrase in tutorial_text
+                for phrase in (
+                    "first contribution",
+                    "first-contribution",
+                    "fork-commit-merge",
+                    "learn git",
+                    "practice pull request",
+                )
+            ):
+                return None
+            stars = repository["stargazerCount"]
+            connections = {
+                key: repository[key]["totalCount"]
+                for key in ("issues", "pullRequests", "helpWanted", "goodFirst")
+            }
+            if (
+                type(stars) is not int
+                or stars < 0
+                or any(type(value) is not int or value < 0 for value in connections.values())
+            ):
+                raise TypeError("repository counters")
+            default_branch = repository.get("defaultBranchRef") or {}
+            license_info = repository.get("licenseInfo") or {}
+            if not isinstance(default_branch, dict) or not isinstance(license_info, dict):
+                raise TypeError("repository metadata")
+            branch = default_branch.get("name")
+            spdx = license_info.get("spdxId")
+            if (
+                not isinstance(branch, str)
+                or not branch
+                or not isinstance(spdx, str)
+                or not spdx
+                or spdx in {"NOASSERTION", "OTHER"}
+            ):
+                return None
+            pushed_at = _parse_time(repository.get("pushedAt"))
+            if pushed_at is None:
+                return None
+
+            fresh_cutoff = observed_at - timedelta(days=criteria.fresh_issue_days)
+            fresh_issue_ids: set[str] = set()
+            for connection_name in ("helpWanted", "goodFirst"):
+                nodes = repository[connection_name].get("nodes")
+                if not isinstance(nodes, list):
+                    raise TypeError("invited issue nodes")
+                for node in nodes:
+                    if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+                        raise TypeError("invited issue node")
+                    assignees = node.get("assignees")
+                    if (
+                        not isinstance(assignees, dict)
+                        or type(assignees.get("totalCount")) is not int
+                    ):
+                        raise TypeError("invited issue assignees")
+                    updated_at = _parse_time(node.get("updatedAt"))
+                    if (
+                        updated_at is not None
+                        and updated_at >= fresh_cutoff
+                        and assignees["totalCount"] == 0
+                    ):
+                        fresh_issue_ids.add(node["id"])
+
+            activity_cutoff = observed_at - timedelta(days=90)
+
+            def recent_human_count(connection_name: str, timestamp_name: str) -> int:
+                connection = repository.get(connection_name)
+                nodes = connection.get("nodes") if isinstance(connection, dict) else None
+                if not isinstance(nodes, list):
+                    raise TypeError("recent activity nodes")
+                count = 0
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        raise TypeError("recent activity node")
+                    author = node.get("author")
+                    login = author.get("login") if isinstance(author, dict) else None
+                    timestamp = _parse_time(node.get(timestamp_name))
+                    if (
+                        isinstance(login, str)
+                        and timestamp is not None
+                        and timestamp >= activity_cutoff
+                        and not _bot_login(login)
+                    ):
+                        count += 1
+                return count
+
+            recent_merged = recent_human_count("recentMerged", "mergedAt")
+            recent_closed = recent_human_count("recentClosed", "closedAt")
+        except (KeyError, TypeError) as exc:
+            raise GitHubError("GitHub repository-supply data has an invalid shape") from exc
+
+        open_issues = connections["issues"]
+        open_prs = connections["pullRequests"]
+        ratio = open_issues / max(1, open_prs)
+        invitation_count = len(fresh_issue_ids)
+        human_activity = recent_merged + recent_closed
+        recency = max(0.0, 1.0 - (observed_at - pushed_at).total_seconds() / (90 * 86_400))
+        score = round(
+            40 * min(ratio / 10, 1)
+            + 20 * min(open_issues / 100, 1)
+            + 15 * min(invitation_count / 10, 1)
+            + 15 * min(human_activity / 10, 1)
+            + 10 * recency,
+            2,
+        )
+        return RepositorySupplyCandidate(
+            slug=name_with_owner,
+            url=url,
+            stars=stars,
+            open_issues=open_issues,
+            open_pull_requests=open_prs,
+            issue_pr_ratio=round(ratio, 2),
+            help_wanted_issues=connections["helpWanted"],
+            good_first_issues=connections["goodFirst"],
+            fresh_unassigned_invited_issues=len(fresh_issue_ids),
+            recent_human_merged_prs=recent_merged,
+            recent_human_closed_issues=recent_closed,
+            pushed_at=pushed_at,
+            license_spdx=spdx,
+            default_branch=branch,
+            score=score,
+            forking_allowed=repository["forkingAllowed"],
+            pull_requests_enabled=repository["hasPullRequestsEnabled"],
+            pull_request_creation_policy=policy,
+        )
 
     def _linked_pr_graphql(self, slug: str, issue_number: int) -> bool:
         if not self._token:
@@ -403,7 +1089,10 @@ query LeftoversLinkedPullRequests($owner: String!, $name: String!, $number: Int!
         commit = data.get("commit")
         if not isinstance(commit, dict) or not isinstance(commit.get("sha"), str):
             raise GitHubError("GitHub branch commit has an invalid shape")
-        return commit["sha"]
+        sha = commit["sha"]
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise GitHubError("GitHub branch commit SHA is not an exact lowercase object id")
+        return sha
 
 
 @dataclass

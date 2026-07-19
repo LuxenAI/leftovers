@@ -26,9 +26,12 @@ meter provider calls, impose a hard token ceiling, or replace a supported provid
 9. **Dashboard:** physically read-only telemetry reader and loopback HTTP server. It has no command,
    budget-ledger, publication-ledger, or GitHub mutation interface.
 
-The local implementation uses a bounded temporary host directory mounted into a hardened container.
-The production/high-assurance design places acquisition and the rootless container inside a fresh
-VM/microVM, because containers share the host kernel.
+The existing local Docker/Podman and host-agent paths are rehearsal-only. Production admission
+rejects them before budget, discovery, or acquisition. Docker Sandboxes (`sbx`) is the active
+integration candidate, but its boundary facade is source-disabled and its compatibility rehearsal
+is shell-only: it performs no provider or Terra/high call. The custom
+Virtualization.framework launcher is archival source-disabled research, not an operator activation
+path. Neither candidate changes the non-overridable production gate.
 
 ## Lifecycle
 
@@ -53,8 +56,10 @@ workspace deletion. If container cleanup cannot be proven, the bound workspace i
 Every production and training run is tagged at creation. Model invocations record expected and
 adapter-observed identities, lifecycle timestamps, controller/adapter heartbeats, and qualified
 usage receipts. Training uses a separate controller-owned fixture, synthetic usage, unique state and
-workspace roots, and a publisher-free issue source. UI grouping never makes synthetic usage part of
-production quota totals.
+workspace roots, and a publisher-free issue source. Its admission requires exact attestations for
+the fixture runner, issue source, and lease factory; it also requires the fixed deterministic model
+identity, no network or environment forwarding, no repair loop, and dry-run publication. UI grouping
+never makes synthetic usage part of production quota totals.
 
 ## Candidate policy and scoring
 
@@ -91,15 +96,39 @@ signal. Every score retains its components and reasons in the journal.
 
 ## Execution boundary
 
-The runner constructs runtime arguments itself. Agent/model output cannot add mounts, environment,
-image, network, privileges, or runtime flags. The local container profile uses a read-only root,
-network `none` by default, all capabilities dropped, no-new-privileges, bounded CPU/RAM/PIDs/files,
-tmpfs, an arbitrary host UID, no ports/devices/socket, and a read-only nested `.git` mount.
+The production preflight rejects `agent.backend = "host"`, non-empty `agent.pass_environment`, any
+global or repository bridge network, and the stock `AgentRunner`. The rehearsal runner still
+constructs OCI arguments itself; agent/model output cannot add mounts, environment, image, network,
+privileges, or runtime flags. Its profile uses a read-only root, network `none` by default, all
+capabilities dropped, no-new-privileges, bounded CPU/RAM/PIDs/files, tmpfs, an arbitrary host UID, no
+ports/devices/socket, and a read-only nested `.git` mount.
 
-Planning and review mount the workspace read-only. Implementation mounts only the repository writable.
-Operator-curated setup commands may opt into `bridge`; verification always runs with `network=none`.
-This is a deliberate sharp edge: autonomous profiles should pre-stage pinned dependencies and leave
-setup networking disabled.
+Planning and review mount the rehearsal workspace read-only. Implementation mounts only the
+repository writable. Training cannot exercise a bridge override: an attempted override is rejected
+before budget, discovery, workspace creation, or runtime inspection.
+
+The active `sbx` candidate is intentionally narrower than an execution backend. Its probe pins the
+CLI identity; checks one exact global `service/openai` secret inventory; samples a fixed OpenAI-allow
+and non-OpenAI-deny network canary matrix; creates one clone-mode shell sandbox; and checks ports,
+observed environment names, fixed clone-write canaries, and exact-name cleanup. Those finite checks
+and the name-based lifecycle are useful
+negative evidence, not an attestation of the complete daemon, policy, proxy, or credential boundary.
+`SbxBoundary.provision()` remains source-disabled before command I/O, and `leftovers run --execute`
+still denies before budget or discovery. A future activation must satisfy the full strict evidence
+contract, including credential isolation, bounded post-stop extraction, fresh verification, and
+proven cleanup.
+
+The archival strict-VM manifest contains boot artifacts and resource limits only. Manifest v2 separates
+root- or dedicated-account-owned immutable boot files from a launcher-owned private per-run directory
+containing the sealed manifest, optional read-only request disk, and fresh preallocated writable
+scratch disk. Hardware is fixed in code with zero network/socket/share/interactive devices, and
+receipt v2 binds the exact manifest SHA-256. The manifest has no command or environment field. See
+[`vm/README.md`](vm/README.md). The current one-epoch controller is source-disabled and accepts only
+explicit fixture authorization; broker-shaped authorization is rejected because no verifier exists.
+Its guest source rejects every action and emits no acceptable result. A future whole-cycle runner
+must put acquisition, Git parsing, fixed check execution, and canonical diff generation inside that
+boundary, while a separate dedicated-UID broker owns every launcher path and durable token/replay
+ledger. A caller-supplied string or hash is never sufficient authority.
 
 ## Integrity and publication
 
