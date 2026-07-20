@@ -2,11 +2,13 @@
 
 ## First activation
 
-1. Create `config/leftovers.toml` from the example.
+1. For Codex CLI, run `leftovers --config config/leftovers.toml setup codex`; for a generic adapter,
+   create `config/leftovers.toml` from the example.
 2. Curate a small repository allowlist and record current licenses, contribution rules, AI policy,
    default branch, forbidden paths, and exact offline checks. If AI contributions are allowed, record
    the policy's HTTPS source and the date it was actually checked.
-3. Build a provider-specific agent image from `sandbox/Dockerfile` without GitHub credentials.
+3. Build the sandbox image used for offline verification. Generic container agents also need a
+   provider-specific derivative of `sandbox/Dockerfile` without GitHub credentials.
 4. Run `validate`, `doctor`, fixture scout, the OCI training cycle, live scout, and at least three
    execute-only dry runs.
 5. Inspect audit journals and confirm every temporary workspace is gone.

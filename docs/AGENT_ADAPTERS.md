@@ -1,9 +1,28 @@
 # Agent adapters
 
-Leftovers v0.1 defines a provider-neutral process contract; it does **not** ship a runnable OpenAI,
-Anthropic, local-model, or other provider adapter. The stock sandbox image supplies the execution
-environment only. A deployment must build and review its own adapter before `run --execute` can
-complete.
+Leftovers defines a provider-neutral process contract and ships one first-party execute-only
+integration for Codex CLI. Anthropic, local-model, and other providers still require a deployment to
+build and review its own adapter. The stock sandbox image supplies the execution environment only.
+
+## First-party Codex CLI backend
+
+`agent.backend = "codex-cli"` invokes only the configured Codex executable; extra user-supplied
+arguments and `pass_environment` entries are rejected. The controller selects the model and builds
+all noninteractive, structured-output, permission, feature-disable, and result-path arguments.
+Planning and review are read-only; implementation can write only the temporary workspace. Model-run
+commands have no network and do not inherit the Codex process environment.
+
+The Codex process receives only the small host environment needed to find its saved login. GitHub,
+OpenAI API, Codex access-token, SSH-agent, cloud, and arbitrary variables are not forwarded. User
+config and automatic project instruction injection are disabled, as are project rules, hooks, apps,
+web search, subagents, and remote plugins. Exact final usage is converted from Codex JSONL into the
+normal adapter telemetry protocol. The execution uses an empty isolated `HOME`, denies `.agents` and
+`.codex` reads, and refuses a repository-local `.agents/skills` tree so repository skills cannot
+become a higher-priority instruction channel.
+
+This backend requires Codex CLI 0.145.0 or newer and a model present in its bundled catalog. It is a
+lower-assurance host process and is rejected in `draft-pr` mode. Use `leftovers setup codex` and see
+[`CODEX_CLI.md`](CODEX_CLI.md) for activation and limitations.
 
 ## Process contract
 
@@ -54,10 +73,10 @@ container, and a networked stage could expose the secret.
 
 For higher assurance, use an external model/tool broker that keeps provider credentials outside the
 worker and exposes only the minimum inference operation. A provider CLI on the host may keep its
-credential outside the repository container, but `agent.backend = "host"` is the lower-assurance
-profile and cannot be used with v0.1 draft publication. Direct provider credentials plus bridge
-networking should be limited to curated, explicitly risk-accepted dry runs; `network = "none"`
-cannot reach a hosted model API.
+credential outside the repository container, but `host` and `codex-cli` are lower-assurance profiles
+and cannot be used with draft publication. Direct provider credentials plus bridge networking
+should be limited to curated, explicitly risk-accepted dry runs; `network = "none"` cannot reach a
+hosted model API from a generic container adapter.
 
 Do not claim autonomous operation until the chosen adapter, credential topology, image digest,
 network policy, and all stage outputs have been exercised in execute-only runs with no remote write.

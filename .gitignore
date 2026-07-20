@@ -8,5 +8,6 @@ __pycache__/
 dist/
 build/
 .leftovers/
-.agent/
+.agent/*
+!.agent/CONTINUITY.md
 *.log

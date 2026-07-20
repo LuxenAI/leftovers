@@ -37,6 +37,62 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.repositories[0].slug, "owner/repo")
         self.assertEqual(config.github.api_version, "2026-03-10")
 
+    def test_codex_cli_backend_has_a_fixed_adapter_contract(self) -> None:
+        configured = BASE.replace(
+            'backend = "container"\ncommand = ["agent"]',
+            'backend = "codex-cli"\n'
+            'command = ["/opt/codex/bin/codex"]\n'
+            'provider = "openai-codex-cli"\n'
+            'model = "gpt-5.6-luna"\n'
+            'checkin_required = true\n'
+            'usage_reporting_required = true',
+        )
+        config = load_config(self.write(configured))
+        self.assertEqual(config.agent.backend, "codex-cli")
+
+    def test_codex_cli_backend_rejects_user_arguments_and_environment(self) -> None:
+        base = BASE.replace(
+            'backend = "container"\ncommand = ["agent"]',
+            'backend = "codex-cli"\n'
+            'command = ["codex", "--yolo"]\n'
+            'provider = "openai-codex-cli"\n'
+            'model = "gpt-5.6-luna"\n'
+            'checkin_required = true\n'
+            'usage_reporting_required = true',
+        )
+        with self.assertRaisesRegex(ConfigError, "only the Codex executable"):
+            load_config(self.write(base))
+        exposed = base.replace(
+            'command = ["codex", "--yolo"]',
+            'command = ["codex"]\npass_environment = ["SAFE_LOOKING_VALUE"]',
+        )
+        with self.assertRaisesRegex(ConfigError, "does not accept pass_environment"):
+            load_config(self.write(exposed))
+
+    def test_codex_cli_backend_cannot_enable_draft_publication(self) -> None:
+        digest = "a" * 64
+        configured = (
+            BASE.replace(
+                "[agent]",
+                f'[sandbox]\nimage = "leftovers@sha256:{digest}"\n\n[agent]',
+            )
+            .replace(
+                'backend = "container"\ncommand = ["agent"]',
+                'backend = "codex-cli"\n'
+                'command = ["codex"]\n'
+                'provider = "openai-codex-cli"\n'
+                'model = "gpt-5.6-luna"\n'
+                'checkin_required = true\n'
+                'usage_reporting_required = true',
+            )
+            .replace(
+                'mode = "dry-run"',
+                'mode = "draft-pr"\nexpected_login = "leftovers-bot"\nexpected_user_id = 1',
+            )
+        )
+        with self.assertRaisesRegex(ConfigError, "codex-cli is dry-run only"):
+            load_config(self.write(configured))
+
     def test_unknown_keys_are_rejected(self) -> None:
         with self.assertRaisesRegex(ConfigError, "unknown key"):
             load_config(self.write(BASE + "\n[github]\ntyop = true\n"))
